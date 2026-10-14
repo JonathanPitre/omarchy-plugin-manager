@@ -1680,6 +1680,8 @@ function heartPostCommand(pluginId) {
     "--request", "POST", "--connect-timeout", "3", "--max-time", "5",
     "--header", "Accept: application/json",
     "--header", "Content-Type: application/json",
+    // The worker rejects a POST that does not come from the marketplace site.
+    "--header", "Origin: https://plugins.omarchy.org",
     "--data", JSON.stringify({ pluginId: id, type: "heart" }),
     ENGAGEMENT_API_BASE + "/events"
   ]

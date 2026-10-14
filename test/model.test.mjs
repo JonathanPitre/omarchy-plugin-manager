@@ -55,13 +55,16 @@ const Model = new Function(
 )()
 
 test("Browse reads the canonical catalog endpoint from the helper alone", () => {
-  // The catalog is fetched, projected and cached by the pinned helper; no
-  // QML or JavaScript names the endpoint, so nothing here can be pointed at
-  // another host. Python's subprocess contract pins the same URL and rejects
-  // even valid JSON returned with a redirect status.
+  // The catalog is fetched, projected and cached by the pinned helper. No
+  // QML or JavaScript names that endpoint, so nothing here can retarget the
+  // catalog host. Python's subprocess contract pins the same URL and rejects
+  // even valid JSON returned with a redirect status. The engagement worker
+  // still requires this site as the Origin of a heart, and that header is
+  // not a catalog fetch.
   const helper = readFileSync(new URL("../helpers/pinned_update.py", import.meta.url), "utf8")
   assert.match(helper, /^CATALOG_URL = "https:\/\/plugins\.omarchy\.org\/catalog\.json"$/m)
-  assert.doesNotMatch(source, /CATALOG_URL|plugins\.omarchy\.org/)
+  assert.doesNotMatch(source, /CATALOG_URL|catalog\.json/)
+  assert.deepEqual(source.match(/plugins\.omarchy\.org/g), ["plugins.omarchy.org"])
 })
 
 test("pinned update eligibility binds raw repo, verified status, unique id and full SHA", () => {
@@ -2193,6 +2196,7 @@ test("heartPostCommand posts one heart event with no shell involved", () => {
   assert.equal(command[0], "curl")
   assert.ok(command.includes("--data"))
   assert.equal(command[command.indexOf("--data") + 1], JSON.stringify({ pluginId: "io.github.acme.thing", type: "heart" }))
+  assert.ok(command.includes("Origin: https://plugins.omarchy.org"))
   assert.equal(command[command.length - 1], "https://api.omarchyplugins.com/v1/events")
   assert.deepEqual(Model.heartPostCommand(""), [])
   assert.deepEqual(Model.heartPostCommand("../escape"), [])
