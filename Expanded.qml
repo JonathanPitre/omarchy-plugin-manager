@@ -220,6 +220,7 @@ Item {
   property alias loadError: store.loadError
   property alias checkingUpdates: store.checkingUpdates
   readonly property alias behindCount: store.behindCount
+  readonly property alias bulkUpdatableCount: store.bulkUpdatableCount
   readonly property alias updateActionsEnabled: store.updateActionsEnabled
   readonly property alias installedTotal: store.installedTotal
   property alias catalog: store.catalog
@@ -820,7 +821,8 @@ Item {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        height: Math.max(title.implicitHeight, refreshButton.height)
+        height: Math.max(title.implicitHeight, refreshButton.height,
+          updateAllButton.visible ? updateAllButton.implicitHeight : 0)
 
         Text {
           id: titleIcon
@@ -973,6 +975,23 @@ Item {
           }
         }
 
+        Button {
+          id: updateAllButton
+          anchors.right: tabs.left
+          anchors.rightMargin: Style.space(10)
+          anchors.verticalCenter: parent.verticalCenter
+          visible: !root.browsing && root.bulkUpdatableCount > 0
+          text: "Update all (" + root.bulkUpdatableCount + ")"
+          tooltipText: "Update every plugin with an installable update"
+          bordered: true
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.caption
+          enabled: root.updateActionsEnabled && !root.barMovePending
+          opacity: enabled ? 1 : 0.4
+          onClicked: store.askBulkUpdate()
+        }
+
         ButtonGroup {
           id: tabs
           enabled: !root.barMovePending
@@ -1055,7 +1074,7 @@ Item {
           id: refreshButton
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
-          iconText: root.refreshing ? "" : "󰑐"
+          iconText: root.refreshing ? "" : "󰑓"
           fontSize: Style.font.display
           tooltipText: root.browsing ? "Re-fetch the catalog" : "Re-read the plugin list"
           foreground: root.foreground
@@ -1074,7 +1093,7 @@ Item {
             textFormat: Text.PlainText
             anchors.centerIn: parent
             visible: root.refreshing
-            text: "󰑐"
+            text: "󰑓"
             color: refreshButton.foreground
             font.family: refreshButton.fontFamily
             font.pixelSize: refreshButton.fontSize
