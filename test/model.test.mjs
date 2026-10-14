@@ -3197,6 +3197,9 @@ test("star and heart counts are the controls, with no new buttons", () => {
   assert.match(details, /action: "star"/)
   assert.match(details, /action: "heart"/)
   assert.match(details, /root\.starRequested\(\) : root\.heartRequested\(\)/)
+  // The delegate owns the id the action bindings read: without it every
+  // value's color binding fails and falls back to black text.
+  assert.match(details, /Item \{\s*id: field\s*required property var modelData/)
   // Clicks stay inert where they cannot work: a star without an exact GitHub
   // slug, a heart without a postable id.
   assert.match(card, /enabled: root\.starActionable/)

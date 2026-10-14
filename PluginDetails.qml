@@ -308,6 +308,7 @@ Item {
                 model: root.fieldRows
 
                 Item {
+                  id: field
                   required property var modelData
                   width: detailsContent.width
                   height: Math.max(fieldLabel.implicitHeight, fieldValue.implicitHeight)
