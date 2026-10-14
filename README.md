@@ -684,10 +684,15 @@ the left — `[C] CATEGORY  [F] KIND  [A] AVAILABILITY  [S] RECENTLY ADDED`,
 each naming its dropdown while neutral and its value, brighter, once it
 narrows — and `[↵] DETAILS  [/] SEARCH` on the right.
 
-Sort explicitly by **GitHub stars**, **Marketplace hearts**, **Recently added**
-(newest first), or **Name**.
-Unknown counts stay unknown and sort after real counts; stars and hearts are
-never combined. Names and ids provide deterministic tie-breakers.
+Sort explicitly by **Recently added** (newest first, the default), **Recent
+activity**, **Most starred**, **Most viewed**, **Most copied**, **Most
+hearts**, **Top ranked**, **Install rate**, **A–Z**, **Verified**, or
+**Unverified**, matching the website order and meaning.
+Unknown counts stay unknown and sort after real counts; stars, views, copies,
+and hearts are never combined. Install rate follows the website Wilson lower
+bound with a 20-view minimum. Top ranked sums per-metric ranks over hearts,
+copies, views, and stars. Verified and Unverified group that status first.
+Names and ids provide deterministic tie-breakers.
 
 Cards are summaries: preview, three description lines, creator, version,
 separate popularity counts, installed state, and an install or details action.
@@ -709,8 +714,9 @@ The creator gets one line and the catalog version shares the next with a
 yellow star for GitHub stars and a red heart for anonymous Marketplace hearts,
 each count sitting on its icon's baseline beside the details and install
 buttons. The metrics stay separate: stars come from each `catalog.json`
-listing, while hearts
+listing, while views, copies, and hearts
 come from `https://api.omarchyplugins.com/v1/stats` at
+`plugins[pluginId].views`, `plugins[pluginId].copies`, and
 `plugins[pluginId].hearts`. Missing or malformed counts are omitted rather than
 shown as zero.
 

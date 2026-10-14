@@ -1983,9 +1983,16 @@ test("details name an unreviewed offer as unreviewed, in both windows", () => {
 test("Browse sort options put Recently added first", () => {
   assert.deepEqual(Model.catalogSortOptions(), [
     { value: "recently-added", label: "Recently added" },
-    { value: "stars", label: "GitHub stars" },
-    { value: "hearts", label: "Hearts" },
-    { value: "name", label: "Name" }
+    { value: "updated", label: "Recent activity" },
+    { value: "stars", label: "Most starred" },
+    { value: "views", label: "Most viewed" },
+    { value: "copies", label: "Most copied" },
+    { value: "hearts", label: "Most hearts" },
+    { value: "rank", label: "Top ranked" },
+    { value: "installRate", label: "Install rate" },
+    { value: "name", label: "A–Z" },
+    { value: "verified", label: "Verified" },
+    { value: "unverified", label: "Unverified" }
   ])
 })
 
@@ -3226,7 +3233,7 @@ test("browseFilterHints names the filter when neutral and its value when narrowi
     { key: "c", text: "GAMES", active: true },
     { key: "f", text: "BAR-WIDGET", active: true },
     { key: "a", text: "INSTALLED", active: true },
-    { key: "s", text: "GITHUB STARS", active: true }
+    { key: "s", text: "MOST STARRED", active: true }
   ])
   // A value the options no longer carry still reads as itself, never blank.
   assert.equal(Model.browseFilterHints({ category: "gone" }, options)[0].text, "GONE")
@@ -3473,8 +3480,9 @@ test("every keyboard-cycled filter replays its value into its dropdown", () => {
 
 test("nextOption cycles any option list and nextKind is that same walk", () => {
   const options = Model.catalogSortOptions()
-  assert.equal(Model.nextOption(options, "recently-added"), "stars")
-  assert.equal(Model.nextOption(options, "name"), "recently-added")
+  assert.equal(Model.nextOption(options, "recently-added"), "updated")
+  assert.equal(Model.nextOption(options, "name"), "verified")
+  assert.equal(Model.nextOption(options, "unverified"), "recently-added")
   assert.equal(Model.nextOption(options, "gone"), "recently-added")
   assert.equal(Model.nextKind(options, "hearts"), Model.nextOption(options, "hearts"))
 })
