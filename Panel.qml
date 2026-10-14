@@ -148,6 +148,7 @@ Panel {
   // the Installed re-read includes its update check, Browse the catalog fetch.
   readonly property bool refreshing: browsing ? catalogLoading : (loading || checkingUpdates)
   readonly property alias behindCount: store.behindCount
+  readonly property alias bulkUpdatableCount: store.bulkUpdatableCount
   readonly property alias updateActionsEnabled: store.updateActionsEnabled
 
   // One click-time release probe for the whole panel. Every explicit
@@ -745,6 +746,11 @@ Panel {
     store.startUpdate(row)
   }
 
+  function askBulkUpdate() {
+    if (!store.askBulkUpdate()) return
+    revokeReleaseNavigation()
+  }
+
   // ---- Keyboard -----------------------------------------------------------
 
   // In a grid, "down" means the card below, not the next one along — so the
@@ -1078,7 +1084,7 @@ Panel {
             // The button's own glyph steps aside while a refresh runs and the
             // spinner below takes its place: a turning arrow says "working"
             // where a greyed one only said "not now".
-            iconText: root.refreshing ? "" : "󰑐"
+            iconText: root.refreshing ? "" : "󰑓"
             // The one icon in the header, next to two text buttons: at the
             // default size it read as an afterthought beside them. Display
             // size puts it on the same scale as the title at the other end.
@@ -1104,7 +1110,7 @@ Panel {
               textFormat: Text.PlainText
               anchors.centerIn: parent
               visible: root.refreshing
-              text: "󰑐"
+              text: "󰑓"
               color: refreshButton.foreground
               font.family: refreshButton.fontFamily
               font.pixelSize: refreshButton.fontSize
@@ -1123,31 +1129,57 @@ Panel {
 
         // The count line gets the whole width on its own row under the
         // title: beside it, the tabs and two icons left it elided, and
-        // "to update" was the part that got cut.
-        Text {
-          id: subtitle
-          // Never rich text: AutoText would fetch what a crafted string points at.
-          textFormat: Text.PlainText
+        // "to update" was the part that got cut. The Update-all button
+        // shares the row on the Installed tab while updates are installable.
+        Item {
           x: title.x
           width: parent.width - x
-          visible: text !== ""
-          elide: Text.ElideRight
-          text: {
-            if (root.browsing) {
-              if (root.catalogLoading && root.catalog.length === 0) return "fetching catalog…"
-              if (root.catalog.length === 0) return ""
-              return "showing " + root.visibleCatalog.length + " of " + root.catalog.length
+          height: Math.max(subtitle.implicitHeight,
+            updateAllButton.visible ? updateAllButton.implicitHeight : 0)
+
+          Text {
+            id: subtitle
+            // Never rich text: AutoText would fetch what a crafted string points at.
+            textFormat: Text.PlainText
+            anchors.left: parent.left
+            anchors.right: updateAllButton.visible ? updateAllButton.left : parent.right
+            anchors.rightMargin: updateAllButton.visible ? Style.space(8) : 0
+            anchors.verticalCenter: parent.verticalCenter
+            visible: text !== ""
+            elide: Text.ElideRight
+            text: {
+              if (root.browsing) {
+                if (root.catalogLoading && root.catalog.length === 0) return "fetching catalog…"
+                if (root.catalog.length === 0) return ""
+                return "showing " + root.visibleCatalog.length + " of " + root.catalog.length
+              }
+              if (root.loading && root.rows.length === 0) return "reading…"
+              if (root.filtered) return "showing " + root.visibleRows.length + " of " + root.rows.length
+              // Tight separators keep the line short even on its own row.
+              var summary = root.installedTotal + " installed · " + root.rows.length + " total"
+              if (root.behindCount > 0) return summary + " · " + root.behindCount + " to update"
+              return summary
             }
-            if (root.loading && root.rows.length === 0) return "reading…"
-            if (root.filtered) return "showing " + root.visibleRows.length + " of " + root.rows.length
-            // Tight separators keep the line short even on its own row.
-            var summary = root.installedTotal + " installed · " + root.rows.length + " total"
-            if (root.behindCount > 0) return summary + " · " + root.behindCount + " to update"
-            return summary
+            color: root.secondaryForeground
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
           }
-          color: root.secondaryForeground
-          font.family: root.contentFontFamily
-          font.pixelSize: Style.font.caption
+
+          Button {
+            id: updateAllButton
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            visible: !root.browsing && root.bulkUpdatableCount > 0
+            text: "Update all (" + root.bulkUpdatableCount + ")"
+            tooltipText: "Update every plugin with an installable update"
+            bordered: true
+            foreground: root.contentForeground
+            fontFamily: root.contentFontFamily
+            fontSize: Style.font.caption
+            enabled: root.updateActionsEnabled
+            opacity: enabled ? 1 : 0.4
+            onClicked: root.askBulkUpdate()
+          }
         }
 
         PanelSeparator { foreground: root.contentForeground }
