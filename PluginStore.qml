@@ -651,6 +651,210 @@ Item {
     + "fi; "
     + "notify-send -a 'Plugin Manager' \"$summary\" \"$detail\""
 
+  // ---- Star and heart -------------------------------------------------------
+  //
+  // The Browse counts double as the controls. Stars toggle through the GitHub
+  // CLI with the repository page as the fallback; hearts post one way to the
+  // engagement API, which records no removal. Neither joins `busy`: a star or
+  // a heart never touches the checkout an install or update owns.
+
+  property var heartedIds: []
+  property bool starBusy: false
+  property bool heartBusy: false
+  property var pendingStarEntry: null
+  property bool pendingStarUnstar: false
+  property var pendingHeartEntry: null
+  // The check's two callbacks may land in either order, so the finish waits
+  // for both before deciding, exactly as the load pair does.
+  property bool starCheckExited: false
+  property bool starCheckOutputDone: false
+  property int starCheckCode: -1
+  property string starCheckError: ""
+  property bool starCheckStarted: false
+  property bool heartExited: false
+  property bool heartOutputDone: false
+  property int heartCode: -1
+  property string heartOutput: ""
+  property bool heartStarted: false
+
+  // A surface opens this in the browser: the signed-out star fallback.
+  signal browseUrlRequested(string url)
+
+  function isHearted(id) {
+    return heartedIds.indexOf(String(id)) >= 0
+  }
+
+  function toggleStar(entry) {
+    if (starBusy || !entry) return false
+    var slug = Model.starSlugFor(entry)
+    if (slug === "") return false
+    var command = Model.starCheckCommand(slug)
+    if (command.length === 0) return false
+    pendingStarEntry = entry
+    pendingStarUnstar = false
+    starCheckExited = false
+    starCheckOutputDone = false
+    starCheckCode = -1
+    starCheckError = ""
+    starCheckStarted = false
+    starBusy = true
+    setStatus("Checking the star for " + entry.name, false)
+    starCheckProc.command = command
+    starCheckProc.running = true
+    return true
+  }
+
+  function finishStarCheck() {
+    if (!starCheckExited || !starCheckOutputDone) return
+    var entry = pendingStarEntry
+    pendingStarEntry = null
+    var slug = entry ? Model.starSlugFor(entry) : ""
+    // A check that never started is a missing CLI: the same fallback as an
+    // answer this panel cannot use.
+    var verdict = starCheckStarted
+      ? Model.classifyStarCheck(starCheckCode, starCheckError) : "unknown"
+    if (verdict === "unknown" || slug === "") {
+      starBusy = false
+      if (entry) {
+        var fallback = Model.githubRepositoryUrl(entry.repo)
+        if (fallback !== "") browseUrlRequested(fallback)
+        else setStatus("Could not reach GitHub for " + entry.name, true)
+      }
+      return
+    }
+    pendingStarEntry = entry
+    pendingStarUnstar = verdict === "starred"
+    var command = pendingStarUnstar ? Model.starDeleteCommand(slug) : Model.starPutCommand(slug)
+    starToggleProc.command = command
+    starToggleProc.running = true
+  }
+
+  function finishStarToggle(exitCode) {
+    var entry = pendingStarEntry
+    pendingStarEntry = null
+    var wasUnstar = pendingStarUnstar
+    pendingStarUnstar = false
+    starBusy = false
+    if (!entry) return
+    if (exitCode !== 0) {
+      setStatus(wasUnstar ? "Could not remove the star from " + entry.name
+        : "Could not star " + entry.name, true)
+      return
+    }
+    bumpCatalogCount(entry.id, "stars", wasUnstar ? -1 : 1)
+    setStatus(wasUnstar ? "Removed the star from " + entry.name
+      : "Starred " + entry.name, false)
+  }
+
+  function sendHeart(entry) {
+    if (heartBusy || !entry) return false
+    var id = Model.engagementPluginId(entry.id)
+    if (id === "") return false
+    if (isHearted(id)) {
+      setStatus("Heart already sent to " + entry.name, false)
+      return true
+    }
+    var command = Model.heartPostCommand(id)
+    if (command.length === 0) return false
+    pendingHeartEntry = entry
+    heartExited = false
+    heartOutputDone = false
+    heartCode = -1
+    heartOutput = ""
+    heartStarted = false
+    heartBusy = true
+    setStatus("Sending a heart to " + entry.name, false)
+    heartProc.command = command
+    heartProc.running = true
+    return true
+  }
+
+  function finishHeart() {
+    if (!heartExited || !heartOutputDone) return
+    var entry = pendingHeartEntry
+    pendingHeartEntry = null
+    heartBusy = false
+    if (!entry || !heartStarted || heartCode !== 0) {
+      if (entry) setStatus("Heart could not be sent to " + entry.name + ". Try again.", true)
+      return
+    }
+    var result = Model.parseHeartResult(heartOutput)
+    if (result === "") {
+      setStatus("Heart could not be sent to " + entry.name + ". Try again.", true)
+      return
+    }
+    // A repeat was already counted from this network, so the count on screen
+    // already holds it: only a fresh recording moves the number.
+    if (heartedIds.indexOf(Model.engagementPluginId(entry.id)) < 0)
+      heartedIds = heartedIds.concat(Model.engagementPluginId(entry.id))
+    if (result === "recorded") bumpCatalogCount(entry.id, "marketplaceHearts", 1)
+    setStatus(result === "recorded" ? "Heart sent to " + entry.name
+      : "Heart already counted for " + entry.name, false)
+  }
+
+  function bumpCatalogCount(id, field, delta) {
+    if (field !== "stars" && field !== "marketplaceHearts") return
+    var key = String(id)
+    var out = []
+    var touched = false
+    for (var i = 0; i < catalog.length; i++) {
+      var entry = catalog[i]
+      if (entry && String(entry.id) === key) {
+        var copy = {}
+        for (var name in entry) copy[name] = entry[name]
+        copy[field] = Model.bumpCount(entry[field], delta)
+        out.push(copy)
+        touched = true
+      } else {
+        out.push(entry)
+      }
+    }
+    // A fresh array resets the grid's model, which rebuilds the visible cards
+    // with the moved counts; the details entry follows on catalog change.
+    if (touched) catalog = out
+  }
+
+  Process {
+    id: starCheckProc
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.starCheckError = text
+        root.starCheckOutputDone = true
+        root.finishStarCheck()
+      }
+    }
+    onStarted: root.starCheckStarted = true
+    onExited: function(exitCode) {
+      root.starCheckCode = exitCode
+      root.starCheckExited = true
+      root.finishStarCheck()
+    }
+  }
+
+  Process {
+    id: starToggleProc
+    onExited: function(exitCode) { root.finishStarToggle(exitCode) }
+  }
+
+  Process {
+    id: heartProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.heartOutput = text
+        root.heartOutputDone = true
+        root.finishHeart()
+      }
+    }
+    onStarted: root.heartStarted = true
+    onExited: function(exitCode) {
+      root.heartCode = exitCode
+      root.heartExited = true
+      root.finishHeart()
+    }
+  }
+
   // ---- Asking -------------------------------------------------------------
   //
   // Each ask returns whether the request was taken. A surface uses that to do

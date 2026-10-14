@@ -82,6 +82,7 @@ Panel {
       root.clampSelection()
       if (root.placementRefreshStarted) root.placementRowsReady = true
     }
+    function onBrowseUrlRequested(url) { root.navigateExternalUrl(url) }
   }
 
   property alias rows: store.rows
@@ -1775,6 +1776,8 @@ Panel {
               root.selectedIndex = index
               root.askInstall(modelData)
             }
+            onStarRequested: store.toggleStar(modelData)
+            onHeartRequested: store.sendHeart(modelData)
           }
         }
 
@@ -2244,6 +2247,8 @@ Panel {
           root.requestGithubNavigation(candidates, fallbackUrl)
         }
         onInstallRequested: root.askInstall(root.detailsEntry)
+        onStarRequested: store.toggleStar(root.detailsEntry)
+        onHeartRequested: store.sendHeart(root.detailsEntry)
       }
 
       ActionConfirmDialog {

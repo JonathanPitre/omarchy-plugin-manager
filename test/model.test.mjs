@@ -26,6 +26,8 @@ const Model = new Function(
     installState, installBlockedReason, installStateDiffers, catalogUnverifiedSnapshot,
     installUnverifiedConfirmMessage, allowUnverifiedInstalls,
     starLabel, accentColor, installedTint, catalogDetailFields, catalogMetaLine,
+    starSlugFor, starCheckCommand, starPutCommand, starDeleteCommand, classifyStarCheck,
+    engagementPluginId, heartPostCommand, parseHeartResult, bumpCount,
     repoShortLabel, browsableUrl, repoWebUrl, rowRepoUrl, expandedTabFromPayload, expandedScreenFromPayload,
     normalizedManifestVersion, normalizedReleaseVersion, releaseVersionLabel,
     githubReleaseCandidates, versionReleaseCandidates, versionFallbackUrl,
@@ -2153,6 +2155,64 @@ test("starLabel keeps big counts short", () => {
   assert.equal(Model.starLabel(undefined), "")
 })
 
+test("starSlugFor names the exact GitHub repository a star would act on", () => {
+  assert.equal(Model.starSlugFor({ repo: "https://github.com/acme/thing" }), "acme/thing")
+  assert.equal(Model.starSlugFor({ repo: "git@github.com:acme/thing.git" }), "acme/thing")
+  assert.equal(Model.starSlugFor({ repo: "https://gitlab.com/acme/thing" }), "")
+  assert.equal(Model.starSlugFor({ repo: "" }), "")
+  assert.equal(Model.starSlugFor(null), "")
+})
+
+test("star commands call the starred endpoint with no shell involved", () => {
+  assert.deepEqual(Model.starCheckCommand("acme/thing"), ["gh", "api", "--silent", "user/starred/acme/thing"])
+  assert.deepEqual(Model.starPutCommand("acme/thing"), ["gh", "api", "--silent", "-X", "PUT", "user/starred/acme/thing"])
+  assert.deepEqual(Model.starDeleteCommand("acme/thing"), ["gh", "api", "--silent", "-X", "DELETE", "user/starred/acme/thing"])
+  assert.deepEqual(Model.starCheckCommand(""), [])
+  assert.deepEqual(Model.starPutCommand(""), [])
+  assert.deepEqual(Model.starDeleteCommand(""), [])
+})
+
+test("classifyStarCheck reads starred, unstarred, and unknown apart", () => {
+  assert.equal(Model.classifyStarCheck(0, ""), "starred")
+  assert.equal(Model.classifyStarCheck(1, "gh: Not Found (HTTP 404)"), "unstarred")
+  assert.equal(Model.classifyStarCheck(1, ""), "unknown")
+  assert.equal(Model.classifyStarCheck(1, "gh: To use gh, run gh auth login"), "unknown")
+})
+
+test("engagementPluginId only passes the shape the website accepts", () => {
+  assert.equal(Model.engagementPluginId("io.github.acme.thing"), "io.github.acme.thing")
+  assert.equal(Model.engagementPluginId(""), "")
+  assert.equal(Model.engagementPluginId("../escape"), "")
+  assert.equal(Model.engagementPluginId("__proto__"), "")
+  assert.equal(Model.engagementPluginId("constructor"), "")
+  assert.equal(Model.engagementPluginId(null), "")
+})
+
+test("heartPostCommand posts one heart event with no shell involved", () => {
+  const command = Model.heartPostCommand("io.github.acme.thing")
+  assert.equal(command[0], "curl")
+  assert.ok(command.includes("--data"))
+  assert.equal(command[command.indexOf("--data") + 1], JSON.stringify({ pluginId: "io.github.acme.thing", type: "heart" }))
+  assert.equal(command[command.length - 1], "https://api.omarchyplugins.com/v1/events")
+  assert.deepEqual(Model.heartPostCommand(""), [])
+  assert.deepEqual(Model.heartPostCommand("../escape"), [])
+})
+
+test("parseHeartResult tells a counted heart from a repeat and a failure", () => {
+  assert.equal(Model.parseHeartResult(JSON.stringify({ recorded: true, plugin: { hearts: 4 } })), "recorded")
+  assert.equal(Model.parseHeartResult(JSON.stringify({ recorded: false, reason: "repeat" })), "repeat")
+  assert.equal(Model.parseHeartResult(JSON.stringify({ recorded: false })), "")
+  assert.equal(Model.parseHeartResult("not json"), "")
+  assert.equal(Model.parseHeartResult(""), "")
+})
+
+test("bumpCount moves known counts and never invents unknown ones", () => {
+  assert.equal(Model.bumpCount(4, 1), 5)
+  assert.equal(Model.bumpCount(0, -1), 0)
+  assert.equal(Model.bumpCount(null, 1), null)
+  assert.equal(Model.bumpCount(undefined, 1), null)
+})
+
 // Omarchy themes define foreground, background, accent, urgent and muted —
 // there is no success role to borrow, so the installed badge brings its own
 // green and only has to survive both ends of the theme range.
@@ -3116,6 +3176,48 @@ test("repository and Release actions route browser ownership through Panel", () 
   }
 })
 
+test("star and heart counts are the controls, with no new buttons", () => {
+  const card = readFileSync(new URL("../CatalogCard.qml", import.meta.url), "utf8")
+  const pane = readFileSync(new URL("../CatalogDetailsPane.qml", import.meta.url), "utf8")
+  const details = readFileSync(new URL("../PluginDetails.qml", import.meta.url), "utf8")
+  const store = readFileSync(new URL("../PluginStore.qml", import.meta.url), "utf8")
+
+  for (const surface of [card, pane, details]) {
+    assert.match(surface, /signal starRequested\(\)/)
+    assert.match(surface, /signal heartRequested\(\)/)
+    assert.doesNotMatch(surface, /Quickshell\.execDetached/)
+  }
+  // The card and the pane wrap the existing metric rows; the popup details
+  // hang the click off the existing fact rows.
+  assert.match(card, /onClicked: root\.starRequested\(\)/)
+  assert.match(card, /onClicked: root\.heartRequested\(\)/)
+  assert.match(pane, /onClicked: root\.starRequested\(\)/)
+  assert.match(pane, /onClicked: root\.heartRequested\(\)/)
+  assert.match(details, /action: "star"/)
+  assert.match(details, /action: "heart"/)
+  assert.match(details, /root\.starRequested\(\) : root\.heartRequested\(\)/)
+  // Clicks stay inert where they cannot work: a star without an exact GitHub
+  // slug, a heart without a postable id.
+  assert.match(card, /enabled: root\.starActionable/)
+  assert.match(card, /enabled: root\.heartActionable/)
+
+  // The store owns the CLIs; surfaces only forward the entry.
+  assert.match(store, /signal browseUrlRequested\(string url\)/)
+  assert.match(store, /function toggleStar\(entry\)/)
+  assert.match(store, /function sendHeart\(entry\)/)
+  assert.match(store, /function bumpCatalogCount\(id, field, delta\)/)
+  assert.match(store, /id: starCheckProc/)
+  assert.match(store, /id: starToggleProc/)
+  assert.match(store, /id: heartProc/)
+
+  for (const file of ["Panel.qml", "Expanded.qml"]) {
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8")
+    assert.match(source, /onStarRequested: store\.toggleStar\(/)
+    assert.match(source, /onHeartRequested: store\.sendHeart\(/)
+    assert.match(source, /function onBrowseUrlRequested\(url\) \{ root\.navigateExternalUrl\(url\) \}/)
+  }
+})
+
 test("compact panel height uses full available geometry independent of content", () => {
   const panel = readFileSync(new URL("../Panel.qml", import.meta.url), "utf8")
   const surface = panel.match(/KeyboardPanel \{\s*id: panel\b([\s\S]*?)PanelKeyCatcher \{/)
@@ -3581,13 +3683,13 @@ test("catalog cards stay compact while details own complete metadata and actions
   // colour emoji) and its ♥ is hollow. These are filled and stay in-family.
   assert.match(starIcon, /text: "󰓎"/)
   assert.doesNotMatch(starIcon, /anchors\.verticalCenter/)
-  assert.match(starIcon, /color: root\.starColor/)
+  assert.match(starIcon, /color: starMouse\.containsMouse \? "#ffd257" : root\.starColor/)
   assert.match(starIcon, /font\.pixelSize: Style\.font\.title/)
   assert.match(starIcon, /textFormat: Text\.PlainText/)
   const heartIcon = card.slice(card.indexOf("id: heartIcon"), card.indexOf("id: heartCount"))
   assert.match(heartIcon, /text: "󰋑"/)
   assert.doesNotMatch(heartIcon, /anchors\.verticalCenter/)
-  assert.match(heartIcon, /color: root\.heartColor/)
+  assert.match(heartIcon, /color: heartMouse\.containsMouse \? "#f0676c" : root\.heartColor/)
   assert.match(heartIcon, /font\.pixelSize: Style\.font\.title/)
   assert.match(heartIcon, /textFormat: Text\.PlainText/)
   assert.match(card, /readonly property color starColor: "#f5c518"/)
@@ -4704,7 +4806,7 @@ test("CatalogDetailsPane shows the cover on the left and the listing on the righ
 
 test("the catalog details page puts stars and hearts at the right of the title line", () => {
   const pane = readFileSync(new URL("../CatalogDetailsPane.qml", import.meta.url), "utf8")
-  const line = pane.slice(pane.indexOf("id: titleLine"), pane.indexOf("id: titleLine") + 3800)
+  const line = pane.slice(pane.indexOf("id: titleLine"), pane.indexOf("id: titleLine") + 5600)
   // The name keeps the left and yields to the metrics; the metrics keep the
   // right edge, the same gold star and red heart the cards wear, each shown
   // only when the listing has a count.
@@ -4712,8 +4814,8 @@ test("the catalog details page puts stars and hearts at the right of the title l
   assert.match(line, /Row \{\s*id: metricsRow\s*anchors\.right: parent\.right/)
   assert.match(line, /readonly property string starText: Model\.starLabel\(root\.entry \? root\.entry\.stars : null\)/)
   assert.match(line, /readonly property string heartText: Model\.starLabel\(root\.entry \? root\.entry\.marketplaceHearts : null\)/)
-  assert.match(line, /id: starIcon[\s\S]*?text: "󰓎"[\s\S]*?color: "#f5c518"/)
-  assert.match(line, /id: heartIcon[\s\S]*?text: "󰋑"[\s\S]*?color: "#e5484d"/)
+  assert.match(line, /id: starIcon[\s\S]*?text: "󰓎"[\s\S]*?color: starMouse\.containsMouse \? "#ffd257" : "#f5c518"/)
+  assert.match(line, /id: heartIcon[\s\S]*?text: "󰋑"[\s\S]*?color: heartMouse\.containsMouse \? "#f0676c" : "#e5484d"/)
   assert.match(line, /id: starCount[\s\S]*?anchors\.baseline: starIcon\.baseline[\s\S]*?text: metricsRow\.starText/)
   assert.match(line, /id: heartCount[\s\S]*?anchors\.baseline: heartIcon\.baseline[\s\S]*?text: metricsRow\.heartText/)
   // Display-size glyphs with title-size counts: the two numbers should read

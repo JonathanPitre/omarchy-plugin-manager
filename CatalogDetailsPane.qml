@@ -19,6 +19,9 @@ Item {
   readonly property bool installed: entry ? entry.installed === true : false
   property bool previewsEnabled: true
   property bool actionsEnabled: true
+  readonly property string starSlug: Model.starSlugFor(entry)
+  readonly property bool starActionable: starSlug !== ""
+  readonly property bool heartActionable: Model.engagementPluginId(entry ? entry.id : "") !== ""
   property color background: Color.menu.background
   property color foreground: Color.foreground
   required property color secondaryForeground
@@ -26,6 +29,8 @@ Item {
 
   signal backRequested()
   signal installRequested()
+  signal starRequested()
+  signal heartRequested()
   signal previewUndecodable()
   signal githubNavigationRequested(var candidates, string fallbackUrl)
   signal repositoryNavigationRequested(string url)
@@ -203,16 +208,21 @@ Item {
             readonly property string starText: Model.starLabel(root.entry ? root.entry.stars : null)
             readonly property string heartText: Model.starLabel(root.entry ? root.entry.marketplaceHearts : null)
 
-            Row {
+            Item {
               visible: metricsRow.starText !== ""
-              spacing: Style.space(3)
+              width: starRowContent.implicitWidth
+              height: starRowContent.implicitHeight
+
+              Row {
+                id: starRowContent
+                spacing: Style.space(3)
 
               Text {
                 id: starIcon
                 // Never rich text: AutoText would fetch what a crafted string points at.
                 textFormat: Text.PlainText
                 text: "󰓎"
-                color: "#f5c518"
+                color: starMouse.containsMouse ? "#ffd257" : "#f5c518"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.display
               }
@@ -227,18 +237,34 @@ Item {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
               }
+              }
+
+              // The count is the control: the number itself stars.
+              MouseArea {
+                id: starMouse
+                anchors.fill: parent
+                enabled: root.starActionable
+                hoverEnabled: root.starActionable
+                cursorShape: root.starActionable ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.starRequested()
+              }
             }
 
-            Row {
+            Item {
               visible: metricsRow.heartText !== ""
-              spacing: Style.space(3)
+              width: heartRowContent.implicitWidth
+              height: heartRowContent.implicitHeight
+
+              Row {
+                id: heartRowContent
+                spacing: Style.space(3)
 
               Text {
                 id: heartIcon
                 // Never rich text: AutoText would fetch what a crafted string points at.
                 textFormat: Text.PlainText
                 text: "󰋑"
-                color: "#e5484d"
+                color: heartMouse.containsMouse ? "#f0676c" : "#e5484d"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.display
               }
@@ -252,6 +278,17 @@ Item {
                 color: root.secondaryForeground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.title
+              }
+              }
+
+              // The count is the control: the number itself hearts, one way.
+              MouseArea {
+                id: heartMouse
+                anchors.fill: parent
+                enabled: root.heartActionable
+                hoverEnabled: root.heartActionable
+                cursorShape: root.heartActionable ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.heartRequested()
               }
             }
           }

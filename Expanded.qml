@@ -81,6 +81,7 @@ Item {
   Connections {
     target: store
     function onRowsLoaded() { root.clampSelection() }
+    function onBrowseUrlRequested(url) { root.navigateExternalUrl(url) }
   }
 
   // ---- Lifecycle (called by the shell) --------------------------------------
@@ -1591,6 +1592,8 @@ Item {
               root.selectedIndex = index
               root.askInstall(modelData)
             }
+            onStarRequested: store.toggleStar(modelData)
+            onHeartRequested: store.sendHeart(modelData)
           }
         }
 
@@ -1664,6 +1667,8 @@ Item {
 
         onBackRequested: root.closeDetails()
         onInstallRequested: root.askInstall(root.detailsEntry)
+        onStarRequested: store.toggleStar(root.detailsEntry)
+        onHeartRequested: store.sendHeart(root.detailsEntry)
         onGithubNavigationRequested: function(candidates, fallbackUrl) { root.requestGithubNavigation(candidates, fallbackUrl) }
         onRepositoryNavigationRequested: function(url) { root.navigateExternalUrl(url) }
         onPreviewUndecodable: root.previewsSupported = false

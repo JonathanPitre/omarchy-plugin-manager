@@ -1620,6 +1620,95 @@ function starLabel(count) {
   return String(stars)
 }
 
+// ---- Star and heart actions -------------------------------------------------
+//
+// The Browse counts double as the controls: the gold star toggles the GitHub
+// star through the GitHub CLI, the red heart sends the marketplace heart.
+// Every command below runs as an argv array, never through a shell.
+
+// The repository a star would act on: an exact GitHub slug, or "" when the
+// listing names nothing starrable. githubRepoSlug already narrows to an exact
+// owner/repo, so the slug stays a path segment and can never become an option.
+function starSlugFor(entry) {
+  if (!entry) return ""
+  return githubRepoSlug(entry.repo)
+}
+
+function starCheckCommand(slug) {
+  if (typeof slug !== "string" || slug === "") return []
+  return ["gh", "api", "--silent", "user/starred/" + slug]
+}
+
+function starPutCommand(slug) {
+  if (typeof slug !== "string" || slug === "") return []
+  return ["gh", "api", "--silent", "-X", "PUT", "user/starred/" + slug]
+}
+
+function starDeleteCommand(slug) {
+  if (typeof slug !== "string" || slug === "") return []
+  return ["gh", "api", "--silent", "-X", "DELETE", "user/starred/" + slug]
+}
+
+// Reads the check's outcome. Exit 0 is starred, a 404 is unstarred, and
+// anything else — signed out, offline, rate limited, no CLI at all — is
+// unknown, which opens the repository page instead.
+function classifyStarCheck(exitCode, stderr) {
+  if (exitCode === 0) return "starred"
+  var text = String(stderr || "")
+  if (/(^|[^A-Za-z])404([^0-9]|$)|not found/i.test(text)) return "unstarred"
+  return "unknown"
+}
+
+// Plugin ids are untrusted catalog text. The engagement API takes the same
+// shape the website requires, so only that shape is ever posted.
+var ENGAGEMENT_PLUGIN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
+function engagementPluginId(value) {
+  if (typeof value !== "string" || !ENGAGEMENT_PLUGIN_ID.test(value)) return ""
+  var lower = value.toLowerCase()
+  if (lower === "__proto__" || lower === "constructor" || lower === "prototype") return ""
+  return value
+}
+
+var ENGAGEMENT_API_BASE = "https://api.omarchyplugins.com/v1"
+
+function heartPostCommand(pluginId) {
+  var id = engagementPluginId(pluginId)
+  if (id === "") return []
+  return [
+    "curl", "--silent", "--show-error",
+    "--request", "POST", "--connect-timeout", "3", "--max-time", "5",
+    "--header", "Accept: application/json",
+    "--header", "Content-Type: application/json",
+    "--data", JSON.stringify({ pluginId: id, type: "heart" }),
+    ENGAGEMENT_API_BASE + "/events"
+  ]
+}
+
+// Reads the heart POST's answer. "recorded" counted, "repeat" was already
+// counted from this network, and anything else means the heart needs a retry.
+function parseHeartResult(text) {
+  var payload = null
+  try {
+    payload = JSON.parse(String(text || "").trim())
+  } catch (error) {
+    return ""
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return ""
+  if (payload.recorded === true) return "recorded"
+  if (payload.recorded === false && payload.reason === "repeat") return "repeat"
+  return ""
+}
+
+// Optimistic count moves after a successful toggle. Unknown stays unknown:
+// a missing count is not a zero, and bumping it would invent a number the
+// source never supplied.
+function bumpCount(count, delta) {
+  var base = catalogCount(count)
+  if (base === null) return null
+  return Math.max(0, base + delta)
+}
+
 // What the card's button should say. The registry lists plenty of things that
 // are not one-command installable — suites with their own installers, repos
 // that are not plugin-shaped — and each carries a note saying why. Showing the
