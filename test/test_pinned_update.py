@@ -1027,7 +1027,7 @@ class CatalogCacheTests(unittest.TestCase):
         return sorted(p.name for p in self.cache_dir.iterdir() if p.name.startswith(".catalog.json.tmp."))
 
     def compatible(self, plugins=({"id": "cached", "addedAt": None, "listedAt": None},)):
-        return {"projectionSchemaVersion": 2, "generatedAt": "cached", "plugins": list(plugins)}
+        return {"projectionSchemaVersion": 3, "generatedAt": "cached", "plugins": list(plugins)}
 
     def test_catalog_request_shape_is_exact(self):
         good = {"schemaVersion": 1, "catalog": {"force": True}}
@@ -1068,7 +1068,7 @@ class CatalogCacheTests(unittest.TestCase):
         before = os.stat(self.cache_dir / "catalog.json")
         served = self.serve(force=True)
         projected = json.loads(served)
-        self.assertEqual(projected["projectionSchemaVersion"], 2)
+        self.assertEqual(projected["projectionSchemaVersion"], 3)
         self.assertEqual(projected["generatedAt"], "remote")
         self.assertEqual([entry["id"] for entry in projected["plugins"]], ["acme.clock", "acme.new"])
         self.assertEqual(projected["plugins"][0]["marketplaceHearts"], 42)
@@ -1336,7 +1336,8 @@ class CatalogCacheTests(unittest.TestCase):
         self.assertEqual(list(entry), [
             "id", "name", "description", "author", "version", "category", "tags", "kind", "repo",
             "installCommand", "installAvailable", "installNote", "verificationStatus", "sourceType",
-            "stars", "addedAt", "listedAt", "marketplaceHearts", "accent", "initials", "license",
+            "stars", "addedAt", "listedAt", "marketplaceHearts", "marketplaceViews",
+            "marketplaceCopies", "repositoryUpdatedAt", "versionUpdatedAt", "accent", "initials", "license",
             "previewThumbnail", "listingValidatedBranch", "verificationCommit"])
         self.assertEqual(entry["stars"], 3)
         self.assertEqual(entry["sourceType"], "builtin")
