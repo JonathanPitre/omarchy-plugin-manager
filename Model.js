@@ -1707,6 +1707,41 @@ function bumpCount(count, delta) {
   return Math.max(0, base + delta)
 }
 
+// Hearted ids the other surface (or an earlier session) already sent, kept in
+// one cache file both stores read. The website keeps the same memory in
+// localStorage; without it a second surface would POST the heart again.
+var HEARTS_CACHE_SUFFIX = "/.cache/omarchy-plugin-manager/hearts.log"
+
+function heartsCachePath(home) {
+  if (typeof home !== "string" || home === "") return ""
+  return home + HEARTS_CACHE_SUFFIX
+}
+
+function heartsSaveCommand(helperPath, cachePath, pluginId) {
+  var id = engagementPluginId(pluginId)
+  if (typeof helperPath !== "string" || helperPath === ""
+      || typeof cachePath !== "string" || cachePath === "" || id === "") return []
+  return ["/usr/bin/python3", "-I", "-S", helperPath, cachePath, id]
+}
+
+// One validated id per line; anything else in the file stays out of memory.
+// Order preserved, first copy wins, so a ragged file still yields the set.
+// An absurdly large file reads as empty: re-posting a heart beats parsing
+// a gigabyte of cache on the main thread.
+function parseHeartedIds(text) {
+  var raw = String(text || "")
+  if (raw.length > 1048576) return []
+  var out = []
+  var lines = raw.split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i]
+    if (line.charAt(line.length - 1) === "\r") line = line.slice(0, -1)
+    var id = engagementPluginId(line)
+    if (id !== "" && out.indexOf(id) < 0) out.push(id)
+  }
+  return out
+}
+
 // What the card's button should say. The registry lists plenty of things that
 // are not one-command installable — suites with their own installers, repos
 // that are not plugin-shaped — and each carries a note saying why. Showing the

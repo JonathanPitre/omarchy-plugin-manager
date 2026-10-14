@@ -726,7 +726,8 @@ Clicking the heart count sends the marketplace heart one way. The engagement
 API records hearts only and answers `repeat` for a network that already
 hearted, so a heart cannot be removed again from here. A confirmed change updates
 the count and names the plugin on the status line. An already-counted heart
-refreshes the total.
+refreshes the total. Sent hearts are remembered in the cache, so neither the
+other view nor a restart can send one twice.
 
 For an exact GitHub repository, opening the Release action checks names
 `v<version>` and then `<version>` through the same bounded, click-time probe used

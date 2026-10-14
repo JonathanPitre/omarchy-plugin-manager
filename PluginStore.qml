@@ -654,6 +654,9 @@ Item {
   // ---- Star and heart -------------------------------------------------------
   //
   property var heartedIds: []
+  // One cache file both surfaces read, so a heart sent from the popup is
+  // never posted again from the expanded panel (or after a restart).
+  readonly property string heartsPath: Model.heartsCachePath(Quickshell.env("HOME"))
   property bool starBusy: false
   property bool heartBusy: false
   property var pendingStarRequest: null
@@ -675,6 +678,17 @@ Item {
 
   function isHearted(id) {
     return heartedIds.indexOf(String(id)) >= 0
+  }
+
+  // Fold file ids into memory. Runs at startup and whenever the other
+  // surface saves, so each store sees every heart exactly once.
+  function unionHearts(text) {
+    var known = Model.parseHeartedIds(text)
+    var missing = []
+    for (var i = 0; i < known.length; i++) {
+      if (heartedIds.indexOf(known[i]) < 0) missing.push(known[i])
+    }
+    if (missing.length > 0) heartedIds = heartedIds.concat(missing)
   }
 
   function toggleStar(entry) {
@@ -768,12 +782,26 @@ Item {
     }
     // A repeat can outlive the cached count; fetch current totals without
     // inventing another increment for a heart the API already counted.
-    if (heartedIds.indexOf(Model.engagementPluginId(entry.id)) < 0)
-      heartedIds = heartedIds.concat(Model.engagementPluginId(entry.id))
+    var id = Model.engagementPluginId(entry.id)
+    if (heartedIds.indexOf(id) < 0) {
+      heartedIds = heartedIds.concat(id)
+      saveHeartedId(id)
+    }
     if (result === "recorded") bumpCatalogCount(entry.id, "marketplaceHearts", 1)
     else loadCatalog(true)
     setStatus(result === "recorded" ? "Heart sent to " + entry.name
       : "Heart already counted for " + entry.name, false)
+  }
+
+  // Best effort: memory already holds the id for this session, so a failed
+  // save only loses the cross-surface memory, never the heart itself.
+  function saveHeartedId(id) {
+    var helperPath = decodeURIComponent(Qt.resolvedUrl("helpers/hearts.py").toString().replace(/^file:\/\//, ""))
+    var command = Model.heartsSaveCommand(helperPath, heartsPath, id)
+    if (command.length === 0) return false
+    heartSaveProc.command = command
+    heartSaveProc.running = true
+    return true
   }
 
   function bumpCatalogCount(id, field, delta) {
@@ -837,6 +865,22 @@ Item {
       root.heartExited = true
       root.finishHeart()
     }
+  }
+
+  // Fire and forget: one id per run, appended, so concurrent surfaces never
+  // lose each other's ids and nothing waits on the write.
+  Process {
+    id: heartSaveProc
+  }
+
+  // A missing file on first run is normal: nothing is remembered yet.
+  FileView {
+    id: heartsFile
+    path: root.heartsPath
+    printErrors: false
+    watchChanges: root.heartsPath !== ""
+    onLoaded: root.unionHearts(text())
+    onFileChanged: root.unionHearts(text())
   }
 
   // ---- Asking -------------------------------------------------------------
