@@ -279,6 +279,8 @@ Item {
       return "Remove " + pendingLabel + "?\n\nIts folder under ~/.config/omarchy/plugins is deleted."
     if (pendingKind === "update")
       return Model.updateUnverifiedConfirmMessage(pendingLabel, Model.findRow(rows, pendingId))
+    if (pendingKind === "bulk-update")
+      return Model.bulkUpdateConfirmMessage(bulkQueue)
     if (pendingKind === "disable")
       return "Disable " + pendingLabel + "?\n\n"
         + "This is the panel you are looking at. It leaves the bar and this window closes with it — "
@@ -831,6 +833,8 @@ Item {
     pendingLabel = ""
     pendingUrl = ""
     pendingPlacementNeeded = false
+    // A dismissed bulk question drops its queue; a run in flight keeps it.
+    if (!bulkActive) bulkQueue = []
   }
 
   // Confirmation answered. A bar widget still owes us one more answer, and it
@@ -862,6 +866,19 @@ Item {
       if (!target || target.unverifiedEligible !== true || target.remoteSha !== expected
           || !canStartUpdate(target)) return
       runUpdate(target)
+      return
+    }
+    if (pendingKind === "bulk-update") {
+      // The queue carries the exact commits the dialog named. Each step
+      // re-gates at run time; a moved tip or flipped setting skips that row
+      // with a reason instead of installing something else.
+      var queue = bulkQueue.slice()
+      cancelPending()
+      if (busy) return
+      bulkQueue = queue
+      bulkResults = []
+      bulkActive = true
+      startNextBulk()
       return
     }
     if (pendingKind === "install") {
@@ -933,6 +950,15 @@ Item {
   // be held to exactly that commit.
   property string pendingUnverifiedSha: ""
 
+  // Bulk update ("Update all"): one confirmation for every installable row,
+  // then sequential steps through runUpdate. bulkQueue holds the bound
+  // {id, name, kind, targetSha} entries; bulkResults collects one
+  // {id, name, ok, reason} per step for the closing summary.
+  property var bulkQueue: []
+  property var bulkResults: []
+  property bool bulkActive: false
+  readonly property int bulkUpdatableCount: Model.bulkUpdateCandidates(rows).length
+
   // The request a row's Update would send: the verified snapshot when one is
   // installable, otherwise the observed unreviewed tip if the user's setting
   // allows it, otherwise nothing. Cached catalog data chooses the request,
@@ -970,6 +996,108 @@ Item {
     pendingUrl = ""
     pendingUnverifiedSha = row.remoteSha
     pendingKind = "update"
+  }
+
+  // The rows one "Update all" would install, re-gated on the live rows: only
+  // candidates whose request still builds and whose bound target still holds.
+  function bulkUpdatables() {
+    if (!root.loadProcessSettled() || !root.updateProcessSettled()) return []
+    var out = []
+    var candidates = Model.bulkUpdateCandidates(rows)
+    for (var i = 0; i < candidates.length; i++) {
+      var row = Model.findRow(rows, candidates[i].id)
+      if (!row || !updateRequest(row)) continue
+      if (candidates[i].kind === "verified") {
+        if (row.pinnedEligible !== true || row.verifiedTargetSha !== candidates[i].targetSha) continue
+      } else if (row.unverifiedEligible !== true || row.remoteSha !== candidates[i].targetSha) continue
+      out.push(candidates[i])
+    }
+    return out
+  }
+
+  function askBulkUpdate() {
+    if (busy || !root.loadProcessSettled() || !root.updateProcessSettled()) return false
+    var candidates = bulkUpdatables()
+    if (candidates.length === 0) return false
+    bulkQueue = candidates
+    bulkResults = []
+    pendingKind = "bulk-update"
+    return true
+  }
+
+  // Next bound step, or a skip with a reason when the row moved under the
+  // question. Serialized through pinnedProc like every other update.
+  function startNextBulk() {
+    if (!bulkActive) return
+    while (bulkQueue.length > 0) {
+      if (busy || pinnedProc.running || actionProc.running
+          || !root.loadProcessSettled() || !root.updateProcessSettled()) {
+        bulkResults.push({ id: bulkQueue[0].id, name: bulkQueue[0].name, ok: false, reason: "interrupted" })
+        bulkQueue = bulkQueue.slice(1)
+        continue
+      }
+      var step = bulkQueue[0]
+      var row = Model.findRow(rows, step.id)
+      var request = row ? updateRequest(row) : null
+      var bound = !!row && !!request
+        && (step.kind === "verified"
+          ? row.pinnedEligible === true && row.verifiedTargetSha === step.targetSha
+          : row.unverifiedEligible === true && row.remoteSha === step.targetSha)
+      if (!bound) {
+        bulkResults.push({ id: step.id, name: step.name, ok: false,
+          reason: !row ? "no longer in the list" : (!request ? "no installable update"
+            : (step.kind === "verified" ? "the verified snapshot moved" : "the upstream tip moved")) })
+        bulkQueue = bulkQueue.slice(1)
+        continue
+      }
+      runUpdate(row)
+      if (!pinnedProc.running) {
+        // Refused between gate and launch: record it and move on, never stall.
+        bulkResults.push({ id: step.id, name: step.name, ok: false, reason: "no installable update" })
+        bulkQueue = bulkQueue.slice(1)
+        continue
+      }
+      return
+    }
+    finishBulk()
+  }
+
+  // One step landed. A capacity refusal ends the run: retrying would fail the
+  // same way, so the rest are skipped, not looped.
+  function finishBulkStep(changed, outcome, reason) {
+    var step = bulkQueue.length > 0 ? bulkQueue[0] : null
+    bulkQueue = bulkQueue.slice(1)
+    if (step) bulkResults.push({ id: step.id, name: step.name, ok: changed,
+      reason: changed ? "" : (reason !== "" ? reason : outcome) })
+    var kind = busyKind
+    var label = busyId
+    busyKind = ""
+    busyId = ""
+    busyRowId = ""
+    pinnedOutput = ""
+    root.actionFinished(kind, label, changed ? 0 : 1)
+    if (!changed && Model.isCapacityRefusal(reason + " " + outcome)) {
+      for (var i = 0; i < bulkQueue.length; i++)
+        bulkResults.push({ id: bulkQueue[i].id, name: bulkQueue[i].name, ok: false, reason: "stopped: transaction limit" })
+      bulkQueue = []
+    }
+    if (bulkQueue.length > 0) {
+      startNextBulk()
+      return
+    }
+    finishBulk()
+  }
+
+  function finishBulk() {
+    bulkQueue = []
+    bulkActive = false
+    var skipped = 0
+    for (var i = 0; i < bulkResults.length; i++) if (bulkResults[i].ok !== true) skipped++
+    setStatus(Model.bulkUpdateSummary(bulkResults), skipped > 0)
+    pendingUpdateReport = ""
+    rows = Model.applyPinnedUpdates(Model.applyUpdateReport(rows, {}), null, allowUnverifiedUpdates)
+    root.requestFreshUpdateCycle()
+    root.refreshUpdateData()
   }
 
   readonly property string pinnedHelperPath:
@@ -1023,6 +1151,10 @@ Item {
     var changed = outcome.indexOf(done) === 0
     var kind = busyKind
     var label = busyId
+    if (bulkActive && !installing) {
+      finishBulkStep(changed, outcome, reason)
+      return
+    }
     busyKind = ""
     busyId = ""
     busyRowId = ""
