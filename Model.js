@@ -1622,10 +1622,6 @@ function starLabel(count) {
 
 // ---- Star and heart actions -------------------------------------------------
 //
-// The Browse counts double as the controls: the gold star toggles the GitHub
-// star through the GitHub CLI, the red heart sends the marketplace heart.
-// Every command below runs as an argv array, never through a shell.
-
 // The repository a star would act on: an exact GitHub slug, or "" when the
 // listing names nothing starrable. githubRepoSlug already narrows to an exact
 // owner/repo, so the slug stays a path segment and can never become an option.
@@ -1634,29 +1630,29 @@ function starSlugFor(entry) {
   return githubRepoSlug(entry.repo)
 }
 
-function starCheckCommand(slug) {
-  if (typeof slug !== "string" || slug === "") return []
-  return ["gh", "api", "--silent", "user/starred/" + slug]
+function starToggleCommand(helperPath, slug) {
+  if (typeof helperPath !== "string" || helperPath === ""
+      || typeof slug !== "string" || slug === ""
+      || githubRepoSlug("https://github.com/" + slug) !== slug) return []
+  return ["/usr/bin/python3", "-I", "-S", helperPath, slug]
 }
 
-function starPutCommand(slug) {
-  if (typeof slug !== "string" || slug === "") return []
-  return ["gh", "api", "--silent", "-X", "PUT", "user/starred/" + slug]
-}
-
-function starDeleteCommand(slug) {
-  if (typeof slug !== "string" || slug === "") return []
-  return ["gh", "api", "--silent", "-X", "DELETE", "user/starred/" + slug]
-}
-
-// Reads the check's outcome. Exit 0 is starred, a 404 is unstarred, and
-// anything else — signed out, offline, rate limited, no CLI at all — is
-// unknown, which opens the repository page instead.
-function classifyStarCheck(exitCode, stderr) {
-  if (exitCode === 0) return "starred"
-  var text = String(stderr || "")
-  if (/(^|[^A-Za-z])404([^0-9]|$)|not found/i.test(text)) return "unstarred"
-  return "unknown"
+function parseStarResult(text, exitCode) {
+  var failed = { kind: "failed" }
+  if (exitCode !== 0 || typeof text !== "string" || text.length > 256) return failed
+  var result = null
+  try {
+    result = JSON.parse(text)
+  } catch (error) {
+    return failed
+  }
+  if (!result || typeof result !== "object" || Array.isArray(result)) return failed
+  var keys = Object.keys(result)
+  if (result.kind === "changed" && keys.length === 2 && typeof result.starred === "boolean")
+    return { kind: "changed", starred: result.starred }
+  if (keys.length === 1 && (result.kind === "fallback" || result.kind === "failed"))
+    return { kind: result.kind }
+  return failed
 }
 
 // Plugin ids are untrusted catalog text. The engagement API takes the same

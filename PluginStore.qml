@@ -653,24 +653,17 @@ Item {
 
   // ---- Star and heart -------------------------------------------------------
   //
-  // The Browse counts double as the controls. Stars toggle through the GitHub
-  // CLI with the repository page as the fallback; hearts post one way to the
-  // engagement API, which records no removal. Neither joins `busy`: a star or
-  // a heart never touches the checkout an install or update owns.
-
   property var heartedIds: []
   property bool starBusy: false
   property bool heartBusy: false
-  property var pendingStarEntry: null
-  property bool pendingStarUnstar: false
+  property var pendingStarRequest: null
   property var pendingHeartEntry: null
-  // The check's two callbacks may land in either order, so the finish waits
-  // for both before deciding, exactly as the load pair does.
-  property bool starCheckExited: false
-  property bool starCheckOutputDone: false
-  property int starCheckCode: -1
-  property string starCheckError: ""
-  property bool starCheckStarted: false
+  property bool starExited: false
+  property bool starOutputDone: false
+  property int starCode: -1
+  property string starOutput: ""
+  property bool starStarted: false
+  property bool starStartSettled: false
   property bool heartExited: false
   property bool heartOutputDone: false
   property int heartCode: -1
@@ -688,62 +681,51 @@ Item {
     if (starBusy || !entry) return false
     var slug = Model.starSlugFor(entry)
     if (slug === "") return false
-    var command = Model.starCheckCommand(slug)
+    var helperPath = decodeURIComponent(Qt.resolvedUrl("helpers/github_star.py").toString().replace(/^file:\/\//, ""))
+    var command = Model.starToggleCommand(helperPath, slug)
     if (command.length === 0) return false
-    pendingStarEntry = entry
-    pendingStarUnstar = false
-    starCheckExited = false
-    starCheckOutputDone = false
-    starCheckCode = -1
-    starCheckError = ""
-    starCheckStarted = false
+    pendingStarRequest = { id: entry.id, name: entry.name, slug: slug }
+    starExited = false
+    starOutputDone = false
+    starCode = -1
+    starOutput = ""
+    starStarted = false
+    starStartSettled = false
     starBusy = true
     setStatus("Checking the star for " + entry.name, false)
-    starCheckProc.command = command
-    starCheckProc.running = true
+    starProc.command = command
+    starProc.running = true
     return true
   }
 
-  function finishStarCheck() {
-    if (!starCheckExited || !starCheckOutputDone) return
-    var entry = pendingStarEntry
-    pendingStarEntry = null
-    var slug = entry ? Model.starSlugFor(entry) : ""
-    // A check that never started is a missing CLI: the same fallback as an
-    // answer this panel cannot use.
-    var verdict = starCheckStarted
-      ? Model.classifyStarCheck(starCheckCode, starCheckError) : "unknown"
-    if (verdict === "unknown" || slug === "") {
-      starBusy = false
-      if (entry) {
-        var fallback = Model.githubRepositoryUrl(entry.repo)
-        if (fallback !== "") browseUrlRequested(fallback)
-        else setStatus("Could not reach GitHub for " + entry.name, true)
-      }
-      return
+  function settleStarStart() {
+    if (!starBusy || starProc.running) return
+    starStartSettled = true
+    if (!starStarted) {
+      starExited = true
+      starOutputDone = true
     }
-    pendingStarEntry = entry
-    pendingStarUnstar = verdict === "starred"
-    var command = pendingStarUnstar ? Model.starDeleteCommand(slug) : Model.starPutCommand(slug)
-    starToggleProc.command = command
-    starToggleProc.running = true
+    finishStar()
   }
 
-  function finishStarToggle(exitCode) {
-    var entry = pendingStarEntry
-    pendingStarEntry = null
-    var wasUnstar = pendingStarUnstar
-    pendingStarUnstar = false
+  function finishStar() {
+    if (!starBusy || starProc.running || !starExited || !starOutputDone || !starStartSettled) return
+    var request = pendingStarRequest
+    pendingStarRequest = null
     starBusy = false
-    if (!entry) return
-    if (exitCode !== 0) {
-      setStatus(wasUnstar ? "Could not remove the star from " + entry.name
-        : "Could not star " + entry.name, true)
+    if (!request) return
+    var result = starStarted ? Model.parseStarResult(starOutput, starCode) : { kind: "fallback" }
+    if (result.kind === "fallback") {
+      browseUrlRequested("https://github.com/" + request.slug)
       return
     }
-    bumpCatalogCount(entry.id, "stars", wasUnstar ? -1 : 1)
-    setStatus(wasUnstar ? "Removed the star from " + entry.name
-      : "Starred " + entry.name, false)
+    if (result.kind === "failed") {
+      setStatus("Could not change the star for " + request.name, true)
+      return
+    }
+    bumpCatalogCount(request.id, "stars", result.starred ? 1 : -1)
+    setStatus(result.starred ? "Starred " + request.name
+      : "Removed the star from " + request.name, false)
   }
 
   function sendHeart(entry) {
@@ -817,26 +799,26 @@ Item {
   }
 
   Process {
-    id: starCheckProc
-    stderr: StdioCollector {
+    id: starProc
+    stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.starCheckError = text
-        root.starCheckOutputDone = true
-        root.finishStarCheck()
+        root.starOutput = text
+        root.starOutputDone = true
+        root.finishStar()
       }
     }
-    onStarted: root.starCheckStarted = true
-    onExited: function(exitCode) {
-      root.starCheckCode = exitCode
-      root.starCheckExited = true
-      root.finishStarCheck()
+    onStarted: {
+      root.starStarted = true
+      root.starStartSettled = true
+      root.finishStar()
     }
-  }
-
-  Process {
-    id: starToggleProc
-    onExited: function(exitCode) { root.finishStarToggle(exitCode) }
+    onExited: function(exitCode) {
+      root.starCode = exitCode
+      root.starExited = true
+      root.finishStar()
+    }
+    onRunningChanged: if (!running) Qt.callLater(root.settleStarStart)
   }
 
   Process {

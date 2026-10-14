@@ -26,7 +26,7 @@ const Model = new Function(
     installState, installBlockedReason, installStateDiffers, catalogUnverifiedSnapshot,
     installUnverifiedConfirmMessage, allowUnverifiedInstalls,
     starLabel, accentColor, installedTint, catalogDetailFields, catalogMetaLine,
-    starSlugFor, starCheckCommand, starPutCommand, starDeleteCommand, classifyStarCheck,
+    starSlugFor, starToggleCommand, parseStarResult,
     engagementPluginId, heartPostCommand, parseHeartResult, bumpCount,
     repoShortLabel, browsableUrl, repoWebUrl, rowRepoUrl, expandedTabFromPayload, expandedScreenFromPayload,
     normalizedManifestVersion, normalizedReleaseVersion, releaseVersionLabel,
@@ -2166,20 +2166,17 @@ test("starSlugFor names the exact GitHub repository a star would act on", () => 
   assert.equal(Model.starSlugFor(null), "")
 })
 
-test("star commands call the starred endpoint with no shell involved", () => {
-  assert.deepEqual(Model.starCheckCommand("acme/thing"), ["gh", "api", "--silent", "user/starred/acme/thing"])
-  assert.deepEqual(Model.starPutCommand("acme/thing"), ["gh", "api", "--silent", "-X", "PUT", "user/starred/acme/thing"])
-  assert.deepEqual(Model.starDeleteCommand("acme/thing"), ["gh", "api", "--silent", "-X", "DELETE", "user/starred/acme/thing"])
-  assert.deepEqual(Model.starCheckCommand(""), [])
-  assert.deepEqual(Model.starPutCommand(""), [])
-  assert.deepEqual(Model.starDeleteCommand(""), [])
+test("star commands invoke the bundled helper with no shell involved", () => {
+  assert.deepEqual(Model.starToggleCommand("/plugin/helpers/github_star.py", "acme/thing"),
+    ["/usr/bin/python3", "-I", "-S", "/plugin/helpers/github_star.py", "acme/thing"])
+  assert.deepEqual(Model.starToggleCommand("/plugin/helpers/github_star.py", ""), [])
 })
 
-test("classifyStarCheck reads starred, unstarred, and unknown apart", () => {
-  assert.equal(Model.classifyStarCheck(0, ""), "starred")
-  assert.equal(Model.classifyStarCheck(1, "gh: Not Found (HTTP 404)"), "unstarred")
-  assert.equal(Model.classifyStarCheck(1, ""), "unknown")
-  assert.equal(Model.classifyStarCheck(1, "gh: To use gh, run gh auth login"), "unknown")
+test("parseStarResult reads changed, fallback, and failed apart", () => {
+  assert.deepEqual(Model.parseStarResult('{"kind":"changed","starred":true}', 0), { kind: "changed", starred: true })
+  assert.deepEqual(Model.parseStarResult('{"kind":"changed","starred":false}', 0), { kind: "changed", starred: false })
+  assert.deepEqual(Model.parseStarResult('{"kind":"fallback"}', 0), { kind: "fallback" })
+  assert.deepEqual(Model.parseStarResult("", 1), { kind: "failed" })
 })
 
 test("engagementPluginId only passes the shape the website accepts", () => {
@@ -3210,8 +3207,7 @@ test("star and heart counts are the controls, with no new buttons", () => {
   assert.match(store, /function toggleStar\(entry\)/)
   assert.match(store, /function sendHeart\(entry\)/)
   assert.match(store, /function bumpCatalogCount\(id, field, delta\)/)
-  assert.match(store, /id: starCheckProc/)
-  assert.match(store, /id: starToggleProc/)
+  assert.match(store, /id: starProc/)
   assert.match(store, /id: heartProc/)
 
   for (const file of ["Panel.qml", "Expanded.qml"]) {

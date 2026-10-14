@@ -719,10 +719,14 @@ details action. Clicking the star count toggles the GitHub star without
 leaving when the GitHub CLI is signed in: a second click removes the star
 again. When `gh` is missing or not signed in, the click opens the repository
 page in your browser instead, where GitHub shows its own sign-in page.
+Each click checks GitHub afresh. Direct connections are reused for the change.
+The [star benchmark](benchmarks/README.md) records the measured improvement
+and its network conditions.
 Clicking the heart count sends the marketplace heart one way. The engagement
 API records hearts only and answers `repeat` for a network that already
-hearted, so a heart cannot be removed again from here. Each success moves the
-count by one and names the plugin on the status line.
+hearted, so a heart cannot be removed again from here. A confirmed change updates
+the count and names the plugin on the status line. An already-counted heart
+refreshes the total.
 
 For an exact GitHub repository, opening the Release action checks names
 `v<version>` and then `<version>` through the same bounded, click-time probe used
