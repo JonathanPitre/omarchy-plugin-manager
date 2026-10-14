@@ -1577,7 +1577,7 @@ Panel {
             spacing: Style.space(10)
 
             Repeater {
-              model: Model.actionHints(root.browsing)
+              model: Model.actionHints(root.browsing, root.bulkUpdatableCount > 0)
               delegate: hintDelegate
             }
           }

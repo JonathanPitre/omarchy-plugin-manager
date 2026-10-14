@@ -3415,17 +3415,28 @@ test("installedFilterHints mirrors the Browse row for Source, Kind, and Status",
   assert.equal(Model.installedFilterHints({}, options)[0].text, "SOURCE")
 })
 
-test("actionHints lists the row actions of each tab in the same hint shape", () => {
+test("actionHints puts Update All first and lights it only when a bulk update is available", () => {
   assert.deepEqual(Model.actionHints(true), [
     { key: "↵", text: "DETAILS", active: false },
     { key: "/", text: "SEARCH", active: false }
   ])
-  assert.deepEqual(Model.actionHints(false), [
-    { key: "↵", text: "UPDATE", active: false },
+  assert.deepEqual(Model.actionHints(false, false), [
     { key: "u", text: "UPDATE ALL", active: false },
+    { key: "↵", text: "UPDATE", active: false },
     { key: "⌦", text: "REMOVE", active: false },
     { key: "/", text: "SEARCH", active: false }
   ])
+  assert.deepEqual(Model.actionHints(false, true), [
+    { key: "u", text: "UPDATE ALL", active: true },
+    { key: "↵", text: "UPDATE", active: false },
+    { key: "⌦", text: "REMOVE", active: false },
+    { key: "/", text: "SEARCH", active: false }
+  ])
+
+  const panel = readFileSync(new URL("../Panel.qml", import.meta.url), "utf8")
+  assert.match(panel, /model: Model\.actionHints\(root\.browsing, root\.bulkUpdatableCount > 0\)/)
+  const expanded = readFileSync(new URL("../Expanded.qml", import.meta.url), "utf8")
+  assert.match(expanded, /Model\.actionHints\(root\.browsing, root\.bulkUpdatableCount > 0\)/)
 })
 
 test("verifiedIdSet joins installed rows to the marketplace's verified listings by id", () => {
@@ -3670,7 +3681,7 @@ test("one hint bar on both tabs: filter hints left, action hints right, keys cyc
   assert.match(bar, /id: filterHints\s+anchors\.left: parent\.left/)
   assert.match(bar, /id: actionHints\s+anchors\.right: parent\.right/)
   assert.match(bar, /model: root\.browsing \? root\.browseFilterHints : root\.installedFilterHints/)
-  assert.match(bar, /model: Model\.actionHints\(root\.browsing\)/)
+  assert.match(bar, /model: Model\.actionHints\(root\.browsing, root\.bulkUpdatableCount > 0\)/)
   // One delegate for both groups, keys shown uppercase in the accent.
   assert.equal(bar.split("delegate: hintDelegate").length - 1, 2)
   assert.match(bar, /text: "\[" \+ hint\.modelData\.key\.toUpperCase\(\) \+ "\]"\s+color: Color\.accent/)
@@ -4368,7 +4379,7 @@ test("the expanded panel carries the Installed filters, their keys, and the hint
   assert.match(hints, /id: filterHints[\s\S]*?model: root\.browsing && root\.detailsOpen \? \[\] : \(root\.browsing \? root\.browseFilterHints : root\.installedFilterHints\)/)
   // The tab keys lead the right-hand group, with the current tab lit, so
   // the bar also says where you are.
-  assert.match(hints, /id: actionHints[\s\S]*?model: \[\s*\{ key: "1", text: "INSTALLED", active: !root\.browsing \},\s*\{ key: "2", text: "BROWSE", active: root\.browsing \}\s*\]\.concat\(root\.browsing && root\.detailsOpen\s*\? \[\{ key: "backspace", text: "BACK", active: false \}\]\s*: Model\.actionHints\(root\.browsing\)\.concat\(\[\{ key: "esc", text: "CLOSE", active: false \}\]\)\)/)
+  assert.match(hints, /id: actionHints[\s\S]*?model: \[\s*\{ key: "1", text: "INSTALLED", active: !root\.browsing \},\s*\{ key: "2", text: "BROWSE", active: root\.browsing \}\s*\]\.concat\(root\.browsing && root\.detailsOpen\s*\? \[\{ key: "backspace", text: "BACK", active: false \}\]\s*: Model\.actionHints\(root\.browsing, root\.bulkUpdatableCount > 0\)\.concat\(\[\{ key: "esc", text: "CLOSE", active: false \}\]\)\)/)
   assert.match(hints, /color: hint\.modelData\.active \? root\.foreground : root\.secondaryForeground/)
 })
 

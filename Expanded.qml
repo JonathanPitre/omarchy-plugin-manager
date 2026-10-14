@@ -1376,7 +1376,7 @@ Item {
                 { key: "2", text: "BROWSE", active: root.browsing }
               ].concat(root.browsing && root.detailsOpen
                 ? [{ key: "backspace", text: "BACK", active: false }]
-                : Model.actionHints(root.browsing).concat([{ key: "esc", text: "CLOSE", active: false }]))
+                : Model.actionHints(root.browsing, root.bulkUpdatableCount > 0).concat([{ key: "esc", text: "CLOSE", active: false }]))
               delegate: hintDelegate
             }
           }

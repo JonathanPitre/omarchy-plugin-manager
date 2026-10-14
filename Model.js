@@ -1604,14 +1604,14 @@ function installedFilterHints(filters, options) {
 // The other end of the same bar: what Enter, Delete, and / do on this tab.
 // Refresh and the tab switch have buttons in the header and Escape closes
 // every panel, so none of those earn a column here.
-function actionHints(browsing) {
+function actionHints(browsing, bulkUpdateAvailable) {
   if (browsing) return [
     { key: "↵", text: "DETAILS", active: false },
     { key: "/", text: "SEARCH", active: false }
   ]
   return [
+    { key: "u", text: "UPDATE ALL", active: bulkUpdateAvailable === true },
     { key: "↵", text: "UPDATE", active: false },
-    { key: "u", text: "UPDATE ALL", active: false },
     { key: "⌦", text: "REMOVE", active: false },
     { key: "/", text: "SEARCH", active: false }
   ]
