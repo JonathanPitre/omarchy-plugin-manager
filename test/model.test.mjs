@@ -36,6 +36,7 @@ const Model = new Function(
     tiledExpandedPanel, openAs, withOpenAs, expandedModeFromPayload, selfEntryFromShellConfig,
     updateBadge, updateCompareUrl,
     updateReleaseCandidates, versionLabel, countBehind,
+    bulkUpdateCandidates, bulkUpdateConfirmMessage, isCapacityRefusal, bulkUpdateSummary,
     trustedGithubReleaseApiUrl, trustedGithubReleaseUrl, trustedGithubRepoUrl, trustedGithubWebUrl,
     githubNavigationRequest, releaseProbeCommand,
     releaseNavigationInitialState, releaseNavigationRequestTransition,
@@ -94,6 +95,53 @@ test("pinned update eligibility binds raw repo, verified status, unique id and f
   assert.equal(pinned.applyPinnedUpdates(rows, null)[0].behind, false)
   assert.equal(pinned.applyPinnedUpdates(rows, null, true)[0].behind, true)
   assert.equal(pinned.applyPinnedUpdates(rows, null, "true")[0].behind, false, "strictly the boolean true")
+})
+
+test("bulk update candidates cover verified rows, opt-in tips, and nothing else", () => {
+  const verified = "b".repeat(40), head = "a".repeat(40), tip = "c".repeat(40)
+  const origin = "https://github.com/acme/plugin"
+  const base = { name: "Plugin", gitManaged: true, updatable: true, headSha: head,
+    updateOrigin: origin, remote: origin, localSha: head, remoteSha: tip,
+    updateChecked: true, ancestors: [head] }
+  const catalog = Model.catalogEntries({ plugins: [{ id: "acme.verified", repo: origin,
+    sourceType: "community", verificationStatus: "verified", verificationCommit: verified }] }, {})
+  const rows = Model.applyPinnedUpdates([
+    { ...base, id: "acme.verified" },
+    { ...base, id: "acme.tip" },
+    { ...base, id: "acme.ahead", ancestors: [head, verified], localSha: head, remoteSha: head },
+    { ...base, id: "acme.plain", updateOrigin: "https://example.com/acme/plain.git",
+      remote: "https://example.com/acme/plain.git" },
+  ], catalog, true)
+  const candidates = Model.bulkUpdateCandidates(rows)
+  assert.deepEqual(candidates.map(c => c.id), ["acme.verified", "acme.tip"])
+  assert.equal(candidates[0].kind, "verified")
+  assert.equal(candidates[0].targetSha, verified)
+  assert.equal(candidates[0].display, "Plugin — verified snapshot " + verified.slice(0, 7))
+  assert.equal(candidates[1].kind, "unverified")
+  assert.equal(candidates[1].targetSha, tip)
+  assert.equal(candidates[1].display, "Plugin — unreviewed commit " + tip.slice(0, 7))
+  // Verified-only default: the tip drops out, the snapshot stays.
+  assert.deepEqual(Model.bulkUpdateCandidates(Model.applyPinnedUpdates(rows, catalog)).map(c => c.id),
+    ["acme.verified"])
+  // The ahead row is superseded with nothing upstream, the plain one has no
+  // GitHub origin: neither is a candidate, but the plain one stays behind
+  // under existing semantics.
+  assert.equal(Model.countBehind(rows), 3)
+  // Confirm message names each plugin with its exact target.
+  const message = Model.bulkUpdateConfirmMessage(candidates)
+  assert.match(message, /Update 2 plugins to exactly these commits\?/)
+  assert.match(message, new RegExp("Plugin — verified snapshot " + verified.slice(0, 7)))
+  assert.match(message, new RegExp("Plugin — unreviewed commit " + tip.slice(0, 7)))
+  assert.equal(Model.bulkUpdateConfirmMessage([candidates[0]]).split("\n")[0], "Update 1 plugin to exactly these commits?")
+  // Summary counts updates and names every skip with its reason.
+  assert.equal(Model.bulkUpdateSummary([
+    { name: "A", ok: true }, { name: "B", ok: false, reason: "tip moved" },
+  ]), "Updated 1, skipped 1 (B: tip moved)")
+  assert.equal(Model.bulkUpdateSummary([{ name: "A", ok: true }]), "Updated 1, skipped 0")
+  // Only the helper's capacity wording stops a bulk run.
+  assert.equal(Model.isCapacityRefusal("Transaction limit: review ~/.config/omarchy/plugin-manager-updates"), true)
+  assert.equal(Model.isCapacityRefusal("update refused"), false)
+  assert.equal(Model.isCapacityRefusal(""), false)
 })
 
 function upstreamFixture(verified = "a".repeat(40)) {
