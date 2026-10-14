@@ -149,6 +149,20 @@ Item {
   // first load has run.
   readonly property string openAs: Model.openAs(selfSettings)
 
+  // Active-transaction history capacity. The helper reads the same shell.json
+  // entry and enforces the same bounds, so this only moves the threshold at
+  // which archival and refusal happen, never what counts as proven success.
+  readonly property int transactionLimit: Model.transactionLimit(selfSettings)
+
+  // Opt-in automatic cleanup of proven-success history only. Refused, failed
+  // and unresolved histories stay for manual review either way.
+  readonly property bool autoCleanupCompleted: Model.autoCleanupCompleted(selfSettings)
+
+  // Edge trigger memory for the opt-in cleanup: set on every status arrival,
+  // so the automatic run fires once when history crosses into the near-limit
+  // margin, not on every refresh while it stays there.
+  property bool updateDataWasNearLimit: false
+
   // Persist one setting through the host, merged over the entry as it was
   // loaded. The local copies move only when the host accepted the write; the
   // watcher reload then confirms it on every surface. `current` is the value
@@ -214,6 +228,49 @@ Item {
     selfEntry = next
     selfSettings = Model.parseSelfSettings(JSON.stringify(next))
     return true
+  }
+
+  // Persist a bounded integer setting through the host, merged over the entry
+  // as it was loaded. Same guards as the boolean write: no rewrite from an
+  // unread entry, no write without a shell connection, no-op when unchanged.
+  function writeSelfIntSetting(key, value, current, min, max, fallback) {
+    var number = typeof value === "number" && isFinite(value) ? Math.floor(value) : fallback
+    if (number < min) number = min
+    if (number > max) number = max
+    if (number === current) return true
+    if (!selfEntryLoaded || !selfEntry) {
+      setStatus("Settings unavailable until the plugin list loads", true)
+      return false
+    }
+    if (!shell || typeof shell.updateEntryInline !== "function" || selfId === "") {
+      setStatus("Could not save the setting: no shell connection", true)
+      return false
+    }
+    var next = Model.withSelfIntSetting(selfEntry, key, number, min, max, fallback)
+    if (shell.updateEntryInline(selfId, next) !== true) {
+      setStatus("Could not save the setting", true)
+      return false
+    }
+    selfEntry = next
+    selfSettings = Model.parseSelfSettings(JSON.stringify(next))
+    return true
+  }
+
+  function setTransactionLimit(value) {
+    if (!writeSelfIntSetting("transactionLimit", value, transactionLimit,
+      Model.TRANSACTION_LIMIT_MIN, Model.TRANSACTION_LIMIT_MAX, Model.TRANSACTION_LIMIT_DEFAULT)) return false
+    // The count caption comes from the last status read under the old limit.
+    // Re-read so Settings shows the new threshold against a fresh count.
+    refreshUpdateData()
+    return true
+  }
+
+  function adjustTransactionLimit(step) {
+    return setTransactionLimit(transactionLimit + step)
+  }
+
+  function setAutoCleanupCompleted(value) {
+    return writeSelfSetting("autoCleanupCompleted", value, autoCleanupCompleted)
   }
 
   property string pendingKind: ""
@@ -1397,8 +1454,15 @@ Item {
     } else if (!proc.cleanup && updateDataProcess === proc) {
       updateDataProcess = null
       if (proc.requestGeneration === updateDataGeneration) {
+        var wasNear = updateDataWasNearLimit
         updateDataStatus = Model.parseUpdateDataStatus(proc.output, code)
         updateDataLoading = false
+        updateDataWasNearLimit = Model.updateDataNearLimit(updateDataStatus)
+        // Opt-in automatic cleanup, edge-triggered: the setting is the
+        // authorization, so no confirmation dialog opens. One run as history
+        // crosses into the near-limit margin; staying there never retriggers.
+        if (!wasNear && updateDataWasNearLimit && autoCleanupCompleted)
+          startCleanupUpdateData()
       }
     }
     proc.destroy()

@@ -6,7 +6,10 @@ import assert from "node:assert/strict"
 
 const read = name => readFileSync(new URL(`../${name}`, import.meta.url), "utf8")
 const Model = runInNewContext(read("Model.js") + `\n;({parseUpdateDataStatus, parseCleanupResult,
-  updateDataCountLabel, cleanupOutcomeText, updateDataCommand, boundedUpdateDataChunk})`)
+  updateDataCountLabel, cleanupOutcomeText, updateDataCommand, boundedUpdateDataChunk,
+  updateDataNearLimit, transactionLimit, autoCleanupCompleted, withSelfSetting, withSelfIntSetting,
+  parseSelfSettings,
+  TRANSACTION_LIMIT_DEFAULT, TRANSACTION_LIMIT_MIN, TRANSACTION_LIMIT_MAX, TRANSACTION_LIMIT_STEP})`)
 const paths = { plugins: "/home/test/.config/omarchy/plugins",
   active: "/home/test/.config/omarchy/plugin-manager-updates",
   archive: "/home/test/.config/omarchy/plugin-manager-updates-archive" }
@@ -28,7 +31,8 @@ test("status validates canonical paths, bounded counts and availability/exit rel
   assert.equal(parseStatus(status({ activeCount: 0 })).activeCount, 0)
   for (const count of [-1, 34, 1.5, "12", null, true])
     assert.equal(parseStatus(status({ activeCount: count })), null)
-  for (const patch of [{ lowerBound: true }, { activeCount: 33 }, { limit: 33 },
+  for (const patch of [{ lowerBound: true }, { activeCount: 33 }, { limit: 7 }, { limit: 129 },
+    { limit: 32.5 }, { limit: "32" }, { limit: null },
     { schemaVersion: 2 }, { paths: null }, { error: "bad" }, { extra: 1 }, { available: 1 }])
     assert.equal(parseStatus(status(patch)), null, JSON.stringify(patch))
   assert.equal(parseStatus(status(), 1), null)
@@ -47,6 +51,57 @@ test("status validates canonical paths, bounded counts and availability/exit rel
   for (const raw of ["", "null", "[]", "{", JSON.stringify(status()) + "x", " ".repeat(8193)])
     assert.equal(Model.parseUpdateDataStatus(raw, 0), null)
   assert.equal(Model.parseUpdateDataStatus(JSON.stringify(status()), 124), null)
+})
+
+test("configured limits validate counts and labels against their own threshold", () => {
+  assert.equal(Model.TRANSACTION_LIMIT_DEFAULT, 32)
+  assert.equal(Model.TRANSACTION_LIMIT_MIN, 8)
+  assert.equal(Model.TRANSACTION_LIMIT_MAX, 128)
+  const sixteen = status({ activeCount: 16, lowerBound: false, limit: 16 })
+  assert.equal(parseStatus(sixteen).activeCount, 16)
+  assert.equal(Model.updateDataCountLabel(parseStatus(sixteen), false), "16/16")
+  assert.equal(Model.updateDataCountLabel(parseStatus(status({ activeCount: 17, lowerBound: true, limit: 16 })), false), "≥17/16 (lower bound)")
+  assert.equal(parseStatus(status({ activeCount: 17, limit: 16 })), null)
+  assert.equal(parseStatus(status({ activeCount: 18, lowerBound: true, limit: 16 })), null)
+  assert.equal(parseStatus(status({ activeCount: 129, lowerBound: true, limit: 128 })).activeCount, 129)
+  assert.equal(parseStatus(status({ activeCount: 8, lowerBound: false, limit: 8 })).activeCount, 8)
+  assert.equal(parseStatus(status({ activeCount: 7, limit: 8 })).activeCount, 7)
+})
+
+test("transaction settings read strictly and write back minimally", () => {
+  assert.equal(Model.transactionLimit({}), 32)
+  assert.equal(Model.transactionLimit(null), 32)
+  assert.equal(Model.transactionLimit({ transactionLimit: 64 }), 64)
+  assert.equal(Model.transactionLimit({ transactionLimit: 8 }), 8)
+  assert.equal(Model.transactionLimit({ transactionLimit: 128 }), 128)
+  for (const value of ["64", true, 7, 129, 32.5, NaN, Infinity, null])
+    assert.equal(Model.transactionLimit({ transactionLimit: value }), 32)
+  assert.equal(Model.transactionLimit(Model.parseSelfSettings(JSON.stringify({ id: "x", transactionLimit: 64 }))), 64)
+  assert.equal(Model.transactionLimit(Model.parseSelfSettings(JSON.stringify({ id: "x", transactionLimit: 1000 }))), 32)
+  assert.equal(Model.autoCleanupCompleted({}), false)
+  assert.equal(Model.autoCleanupCompleted({ autoCleanupCompleted: true }), true)
+  for (const value of [1, "true", {}, []])
+    assert.equal(Model.autoCleanupCompleted({ autoCleanupCompleted: value }), false)
+  const roundTrip = value => JSON.parse(JSON.stringify(value))
+  assert.deepEqual(roundTrip(Model.withSelfIntSetting({ id: "x", a: 1 }, "transactionLimit", 64, 8, 128, 32)),
+    { a: 1, transactionLimit: 64 })
+  assert.deepEqual(roundTrip(Model.withSelfIntSetting({ id: "x", transactionLimit: 64 }, "transactionLimit", 32, 8, 128, 32)), {})
+  assert.deepEqual(roundTrip(Model.withSelfIntSetting({ id: "x" }, "transactionLimit", 1000, 8, 128, 32)), { transactionLimit: 128 })
+  assert.deepEqual(roundTrip(Model.withSelfIntSetting({ id: "x" }, "transactionLimit", 1, 8, 128, 32)), { transactionLimit: 8 })
+  assert.deepEqual(roundTrip(Model.withSelfIntSetting({ id: "x", __proto__: {} }, "transactionLimit", 64, 8, 128, 32)),
+    { transactionLimit: 64 })
+})
+
+test("near-limit warning covers the margin below and any overflow above", () => {
+  assert.equal(Model.updateDataNearLimit(null), false)
+  assert.equal(Model.updateDataNearLimit(status({ activeCount: 0 })), false)
+  assert.equal(Model.updateDataNearLimit(status({ activeCount: 27 })), false)
+  assert.equal(Model.updateDataNearLimit(status({ activeCount: 28 })), true)
+  assert.equal(Model.updateDataNearLimit(status({ activeCount: 32 })), true)
+  assert.equal(Model.updateDataNearLimit(status({ activeCount: 33, lowerBound: true })), true)
+  assert.equal(Model.updateDataNearLimit(status({ activeCount: 5, limit: 8 })), true)
+  assert.equal(Model.updateDataNearLimit(status({ activeCount: 3, limit: 8 })), false)
+  assert.equal(Model.updateDataNearLimit(status({ available: false, activeCount: null, error: "x" })), false)
 })
 
 test("cleanup exact schema rejects inconsistent success, exit codes, counts and partial claims", () => {
@@ -152,6 +207,8 @@ function storeHarness() {
     updateDataRefreshQueued: false, updateDataGeneration: 0, updateDataProcess: null,
     cleanupProcess: null, cleanupOutcome: "", cleanupIsError: false, updateDataDestroying: false,
     externalBusy: false, busyKind: "", barMovePending: null, pendingKind: "", pendingId: "",
+    autoCleanupCompleted: false, updateDataWasNearLimit: false, transactionLimit: 32,
+    selfEntry: {}, selfEntryLoaded: false, selfSettings: {}, selfId: "", shell: null,
     pinnedHelperPath: "/bundle/helper.py", actionProc: { running: false }, pinnedProc: { running: false },
     bulkActive: false, bulkQueue: [], bulkResults: [],
     Qt: { callLater: callback => later.push(callback) }, setStatus() {},
@@ -171,7 +228,8 @@ function storeHarness() {
   const names = ["canCleanupUpdateData", "askCleanupUpdateData", "startCleanupUpdateData", "refreshUpdateData",
     "drainUpdateDataRefresh", "invalidateUpdateData", "finishUpdateDataProcess", "readUpdateDataChunk",
     "stopUpdateDataProcesses", "confirmPending", "cancelPending", "runAction", "launchInstall",
-    "canStartUpdate", "writeSelfSetting", "runDetached"]
+    "canStartUpdate", "writeSelfSetting", "writeSelfIntSetting", "setTransactionLimit",
+    "adjustTransactionLimit", "setAutoCleanupCompleted", "runDetached"]
   runInNewContext(names.map(method).join("\n"), context)
   return { s: context, launches,
     flush() { for (let n = 0; later.length && n < 50; n++) later.shift()(); assert.equal(later.length, 0) },
@@ -263,6 +321,65 @@ test("stale reads settle before new generation; retired callbacks cannot overwri
   assert.equal(h.launches.length, 2)
 })
 
+test("opt-in automatic cleanup fires once on entering the near-limit margin", () => {
+  for (const auto of [false, true]) {
+    const h = storeHarness(), s = h.s
+    s.autoCleanupCompleted = auto
+    s.refreshUpdateData()
+    assert.equal(h.launches.length, 1)
+    h.finish(h.launches[0], status({ activeCount: 28 }))
+    h.flush()
+    assert.equal(s.updateDataWasNearLimit, true)
+    assert.equal(h.launches.length, auto ? 2 : 1)
+    if (!auto) continue
+    assert.equal(h.launches[1].cleanup, true)
+    assert.equal(s.busy, true)
+    h.finish(h.launches[1], cleanup())
+    h.flush()
+    assert.equal(h.launches.length, 3, "cleanup is followed by its status refresh")
+    h.finish(h.launches[2], status({ activeCount: 30 }))
+    h.flush()
+    assert.equal(h.launches.length, 3, "staying near the limit never retriggers")
+    s.refreshUpdateData()
+    h.flush()
+    h.finish(h.launches[3], status({ activeCount: 0 }))
+    h.flush()
+    assert.equal(s.updateDataWasNearLimit, false)
+    s.refreshUpdateData()
+    h.flush()
+    h.finish(h.launches[4], status({ activeCount: 28 }))
+    h.flush()
+    assert.equal(h.launches.length, 6, "re-entering the margin runs again")
+  }
+})
+
+test("integer settings clamp to bounds and reset to the default by removing the key", () => {
+  const h = storeHarness(), s = h.s
+  const writes = []
+  s.selfEntryLoaded = true
+  s.selfId = "io.github.juancasanueva.plugin-manager"
+  s.shell = { updateEntryInline(id, next) { writes.push(JSON.parse(JSON.stringify(next))); return true } }
+  s.selfEntry = { id: s.selfId }
+  assert.equal(s.setTransactionLimit(64), true)
+  assert.deepEqual(writes.at(-1), { transactionLimit: 64 })
+  s.transactionLimit = 64
+  assert.equal(s.setTransactionLimit(64), true)
+  assert.equal(writes.length, 1, "unchanged value writes nothing")
+  assert.equal(s.setTransactionLimit(1000), true)
+  assert.deepEqual(writes.at(-1), { transactionLimit: 128 })
+  assert.equal(s.setTransactionLimit(1), true)
+  assert.deepEqual(writes.at(-1), { transactionLimit: 8 })
+  s.transactionLimit = 8
+  s.selfEntry = { id: s.selfId, transactionLimit: 8 }
+  assert.equal(s.setTransactionLimit(32), true)
+  assert.deepEqual(writes.at(-1), {})
+  assert.equal(s.setAutoCleanupCompleted(true), true)
+  assert.deepEqual(writes.at(-1), { autoCleanupCompleted: true })
+  const busy = storeHarness()
+  busy.s.busyKind = "install"
+  assert.equal(busy.s.setTransactionLimit(64), false)
+})
+
 test("overflow, crash, start failure and destruction cannot become cleanup success", () => {
   for (const stderr of [false, true]) {
     const h = storeHarness(), s = h.s
@@ -288,6 +405,24 @@ test("overflow, crash, start failure and destruction cannot become cleanup succe
   assert.deepEqual(h.launches[1].signals, [15])
   h.finish(h.launches[1], status()); h.flush()
   assert.equal(h.launches.length, 2)
+})
+
+test("both surfaces expose the history limit, auto cleanup and near-limit warning", () => {
+  for (const file of ["Panel.qml", "Expanded.qml"]) {
+    const source = read(file)
+    for (const id of ["transactionLimitText", "limitStepRow", "limitDecreaseButton", "limitIncreaseButton",
+      "autoCleanupText", "autoCleanupSwitch"])
+      assert.match(source, new RegExp(`id: ${id}`), `${file} ${id}`)
+    assert.match(source, /checked: store\.autoCleanupCompleted/)
+    assert.match(source, /store\.setAutoCleanupCompleted\(!store\.autoCleanupCompleted\)/)
+    assert.match(source, /store\.adjustTransactionLimit\(-Model\.TRANSACTION_LIMIT_STEP\)/)
+    assert.match(source, /store\.adjustTransactionLimit\(Model\.TRANSACTION_LIMIT_STEP\)/)
+    assert.match(source, /Model\.updateDataNearLimit\(store\.updateDataStatus\)/)
+    assert.match(source, /store\.transactionLimit/)
+    assert.match(source, /History now: " \+ store\.updateDataCount/)
+  }
+  for (const name of ["setTransactionLimit", "adjustTransactionLimit", "setAutoCleanupCompleted", "writeSelfIntSetting"])
+    assert.notEqual(storeSource.indexOf(`  function ${name}(`), -1, `${name} exists`)
 })
 
 test("both surfaces wire Settings to the shared store and destructive confirmation", () => {
