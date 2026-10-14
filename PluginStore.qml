@@ -751,6 +751,7 @@ Item {
     var id = Model.engagementPluginId(entry.id)
     if (id === "") return false
     if (isHearted(id)) {
+      loadCatalog(true)
       setStatus("Heart already sent to " + entry.name, false)
       return true
     }
@@ -783,11 +784,12 @@ Item {
       setStatus("Heart could not be sent to " + entry.name + ". Try again.", true)
       return
     }
-    // A repeat was already counted from this network, so the count on screen
-    // already holds it: only a fresh recording moves the number.
+    // A repeat can outlive the cached count; fetch current totals without
+    // inventing another increment for a heart the API already counted.
     if (heartedIds.indexOf(Model.engagementPluginId(entry.id)) < 0)
       heartedIds = heartedIds.concat(Model.engagementPluginId(entry.id))
     if (result === "recorded") bumpCatalogCount(entry.id, "marketplaceHearts", 1)
+    else loadCatalog(true)
     setStatus(result === "recorded" ? "Heart sent to " + entry.name
       : "Heart already counted for " + entry.name, false)
   }
