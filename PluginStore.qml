@@ -676,12 +676,31 @@ Item {
   // A surface opens this in the browser: the signed-out star fallback.
   signal browseUrlRequested(string url)
 
+  // Star and like notices clear themselves after a few seconds. Install and
+  // update messages stay until replaced.
+  property string flashedText: ""
+  function flashStatus(text, isError) {
+    flashedText = text
+    setStatus(text, isError === true)
+    flashTimer.restart()
+  }
+  Timer {
+    id: flashTimer
+    interval: 4000
+    repeat: false
+    onTriggered: {
+      if (root.status !== "" && root.status === root.flashedText) root.setStatus("", false)
+    }
+  }
+
   function isHearted(id) {
     return heartedIds.indexOf(String(id)) >= 0
   }
 
   // Fold file ids into memory. Runs at startup and whenever the other
-  // surface saves, so each store sees every heart exactly once.
+  // surface saves, so each store sees every heart exactly once. Reports
+  // whether anything arrived, so the caller can refresh counts the file
+  // cannot carry.
   function unionHearts(text) {
     var known = Model.parseHeartedIds(text)
     var missing = []
@@ -689,6 +708,7 @@ Item {
       if (heartedIds.indexOf(known[i]) < 0) missing.push(known[i])
     }
     if (missing.length > 0) heartedIds = heartedIds.concat(missing)
+    return missing.length > 0
   }
 
   function toggleStar(entry) {
@@ -706,7 +726,7 @@ Item {
     starStarted = false
     starStartSettled = false
     starBusy = true
-    setStatus("Checking the star for " + entry.name, false)
+    flashStatus("Checking the star for " + entry.name, false)
     starProc.command = command
     starProc.running = true
     return true
@@ -734,11 +754,11 @@ Item {
       return
     }
     if (result.kind === "failed") {
-      setStatus("Could not change the star for " + request.name, true)
+      flashStatus("Could not change the star for " + request.name, true)
       return
     }
     bumpCatalogCount(request.id, "stars", result.starred ? 1 : -1)
-    setStatus(result.starred ? "Starred " + request.name
+    flashStatus(result.starred ? "Starred " + request.name
       : "Removed the star from " + request.name, false)
   }
 
@@ -748,7 +768,7 @@ Item {
     if (id === "") return false
     if (isHearted(id)) {
       loadCatalog(true)
-      setStatus("Heart already sent to " + entry.name, false)
+      flashStatus("\"" + entry.name + "\" was already liked.", false)
       return true
     }
     var command = Model.heartPostCommand(id)
@@ -760,7 +780,7 @@ Item {
     heartOutput = ""
     heartStarted = false
     heartBusy = true
-    setStatus("Sending a heart to " + entry.name, false)
+    flashStatus("Liking \"" + entry.name + "\"…", false)
     heartProc.command = command
     heartProc.running = true
     return true
@@ -772,12 +792,12 @@ Item {
     pendingHeartEntry = null
     heartBusy = false
     if (!entry || !heartStarted || heartCode !== 0) {
-      if (entry) setStatus("Heart could not be sent to " + entry.name + ". Try again.", true)
+      if (entry) flashStatus("Could not like \"" + entry.name + "\". Try again.", true)
       return
     }
     var result = Model.parseHeartResult(heartOutput)
     if (result === "") {
-      setStatus("Heart could not be sent to " + entry.name + ". Try again.", true)
+      flashStatus("Could not like \"" + entry.name + "\". Try again.", true)
       return
     }
     // A repeat can outlive the cached count; fetch current totals without
@@ -789,8 +809,8 @@ Item {
     }
     if (result === "recorded") bumpCatalogCount(entry.id, "marketplaceHearts", 1)
     else loadCatalog(true)
-    setStatus(result === "recorded" ? "Heart sent to " + entry.name
-      : "Heart already counted for " + entry.name, false)
+    flashStatus(result === "recorded" ? "\"" + entry.name + "\" was liked."
+      : "\"" + entry.name + "\" was already liked.", false)
   }
 
   // Best effort: memory already holds the id for this session, so a failed
@@ -880,7 +900,9 @@ Item {
     printErrors: false
     watchChanges: root.heartsPath !== ""
     onLoaded: root.unionHearts(text())
-    onFileChanged: root.unionHearts(text())
+    // A heart from the other surface carries no counts, so refresh them
+    // from the catalog instead of inventing an increment here.
+    onFileChanged: if (root.unionHearts(text())) root.loadCatalog(true)
   }
 
   // ---- Asking -------------------------------------------------------------

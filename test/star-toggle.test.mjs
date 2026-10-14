@@ -27,6 +27,7 @@ function starStore() {
     Qt: { resolvedUrl: () => "file:///tmp/plugin%20manager/helpers/github_star.py",
       callLater: callback => later.push(callback) },
     setStatus: (...args) => effects.push(["status", ...args]),
+    flashStatus: (...args) => effects.push(["status", ...args]),
     bumpCatalogCount: (...args) => effects.push(["count", ...args]),
     browseUrlRequested: url => effects.push(["browser", url]),
   }

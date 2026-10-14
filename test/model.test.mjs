@@ -3212,10 +3212,20 @@ test("star and heart counts are the controls, with no new buttons", () => {
 
   for (const file of ["Panel.qml", "Expanded.qml"]) {
     const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8")
-    assert.match(source, /onStarRequested: store\.toggleStar\(/)
-    assert.match(source, /onHeartRequested: store\.sendHeart\(/)
+    assert.match(source, /store\.toggleStar\(modelData\)/)
+    assert.match(source, /store\.sendHeart\(modelData\)/)
+    assert.match(source, /store\.toggleStar\(root\.detailsEntry\)/)
+    assert.match(source, /store\.sendHeart\(root\.detailsEntry\)/)
     assert.match(source, /function onBrowseUrlRequested\(url\) \{ root\.navigateExternalUrl\(url\) \}/)
+    // A star or a like must not lose the scroll offset or the focus when the
+    // grid rebuilds under them.
+    assert.match(source, /property real pendingBrowseY: -1/)
+    assert.match(source, /root\.pendingBrowseY = catalogGrid\.contentY/)
+    assert.match(source, /catalogGrid\.contentY = Math\.min\(restoreY/)
+    assert.match(source, /if \(restoreFocus\) catalogGrid\.forceActiveFocus\(\)/)
   }
+  const expanded = readFileSync(new URL("../Expanded.qml", import.meta.url), "utf8")
+  assert.match(expanded, /if \(root\.browsing\) store\.loadCatalog\(true\)/)
 })
 
 test("compact panel height uses full available geometry independent of content", () => {
@@ -3785,8 +3795,10 @@ test("Panel keeps open details synchronized with catalog install state", () => {
   // A fresh fetch is built on the worker thread and published from its reply.
   assert.match(store, /catalog = message\.entries/)
   // Every published catalog — re-stamp or fresh fetch — refreshes the open
-  // details entry from the same list the cards are drawn from.
-  assert.match(panel, /onCatalogChanged: if \(detailsEntry\) detailsEntry = Model\.findRow\(catalog, detailsEntry\.id\)/)
+  // details entry from the same list the cards are drawn from. A snapshot
+  // click also restores the scroll offset the rebuild dropped.
+  assert.match(panel, /onCatalogChanged: \{\s*if \(detailsEntry\) detailsEntry = Model\.findRow\(catalog, detailsEntry\.id\)/)
+  assert.match(panel, /catalogGrid\.contentY = Math\.min\(restoreY/)
   assert.doesNotMatch(panel, /restampCatalogInstallState|Model\.catalogEntries\(/)
 })
 
@@ -4342,7 +4354,7 @@ test("the expanded panel starts its loads a beat after it opens", () => {
   // serve an IPC call on its main thread, and that stalls whatever is
   // animating at the time.
   assert.match(expanded, /Timer \{\s*id: initialLoad\s*interval: 1300[\s\S]*?onTriggered: root\.loadEverything\(\)/)
-  assert.match(expanded, /function loadEverything\(\) \{\s*if \(!opened \|\| barMovePending\) return\s*store\.loadOnOpen\(\)\s*\}/)
+  assert.match(expanded, /function loadEverything\(\) \{\s*if \(!opened \|\| barMovePending\) return\s*store\.loadOnOpen\(\)[\s\S]*?if \(root\.browsing\) store\.loadCatalog\(true\)\s*\}/)
   const open = expanded.slice(expanded.indexOf("function open(payloadJson) {"), expanded.indexOf("function loadEverything() {"))
   assert.match(open, /initialLoad\.restart\(\)/)
   assert.doesNotMatch(open, /store\.reload\(\)/)
@@ -4745,7 +4757,7 @@ test("Browse details are a third face of the flip, not a dialog", () => {
   assert.match(expanded, /function closeDetails\(\) \{\s*if \(!detailsOpen\) return\s*flipTo\(-1, function\(\) \{ detailsEntry = null \}\)\s*\}/)
   const grid = expanded.slice(expanded.indexOf("id: catalogGrid"), expanded.indexOf("id: catalogGrid") + 200)
   assert.match(grid, /visible: root\.browsing && !root\.detailsOpen/)
-  const pane = expanded.slice(expanded.indexOf("id: browseDetailsPane"), expanded.indexOf("id: browseDetailsPane") + 1600)
+  const pane = expanded.slice(expanded.indexOf("id: browseDetailsPane"), expanded.indexOf("id: browseDetailsPane") + 2200)
   assert.match(pane, /visible: root\.browsing && root\.detailsOpen/)
   assert.match(pane, /anchors\.top: statusLine\.bottom[\s\S]*?anchors\.bottom: hintBar\.top/)
   assert.match(pane, /entry: root\.detailsEntry/)

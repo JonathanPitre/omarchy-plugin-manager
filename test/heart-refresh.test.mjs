@@ -18,24 +18,28 @@ test("a repeated heart refreshes a stale zero from the authoritative catalog", (
     Model, heartExited: true, heartOutputDone: true, pendingHeartEntry: entry,
     heartBusy: true, heartStarted: true, heartCode: 0,
     heartOutput: '{"recorded":false,"reason":"repeat"}', heartedIds: [],
-    setStatus() {}, saveHeartedId(id) { assert.equal(id, entry.id) },
+    flashed: [], flashStatus(text, err) { state.flashed.push([text, err]) },
+    saveHeartedId(id) { assert.equal(id, entry.id) },
     bumpCatalogCount() { assert.fail("a repeat must not invent a count increment") },
     loadCatalog(force) { assert.equal(force, true); entry.marketplaceHearts = 1 },
   }
   callStore("finishHeart", state)
   assert.equal(entry.marketplaceHearts, 1)
   assert.deepEqual(state.heartedIds, [entry.id])
+  assert.deepEqual(state.flashed, [['"Ente Auth" was already liked.', false]])
 })
 
 test("a locally remembered heart still refreshes the count after catalog reload", () => {
   const entry = { id: "lcd1232.ente-auth", name: "Ente Auth", marketplaceHearts: 0 }
   const state = {
-    Model, heartBusy: false, isHearted: () => true, setStatus() {},
+    Model, heartBusy: false, isHearted: () => true,
+    flashed: [], flashStatus(text, err) { state.flashed.push([text, err]) },
     saveHeartedId() { assert.fail("a remembered heart posts nothing and saves nothing") },
     loadCatalog(force) { assert.equal(force, true); entry.marketplaceHearts = 1 },
   }
   assert.equal(callStore("sendHeart", state, entry), true)
   assert.equal(entry.marketplaceHearts, 1)
+  assert.deepEqual(state.flashed, [['"Ente Auth" was already liked.', false]])
 })
 
 test("parseHeartedIds keeps only valid ids, deduplicated, in order", () => {
@@ -70,12 +74,14 @@ test("a heart the other surface saved never POSTs again", () => {
   const state = {
     Model, heartedIds: [], heartBusy: false,
     isHearted: (id) => state.heartedIds.indexOf(String(id)) >= 0,
-    setStatus() {}, loadCatalog() {},
+    flashed: [], flashStatus(text, err) { state.flashed.push([text, err]) },
+    loadCatalog() {},
   }
   state.heartProc = {}
   callStore("unionHearts", state, "other.surface.id\n")
   assert.equal(callStore("sendHeart", state, entry), true)
   assert.deepEqual(state.heartProc, {})
+  assert.deepEqual(state.flashed, [['"Other Surface" was already liked.', false]])
 })
 
 test("a recorded heart is saved for the other surface", () => {  const entry = { id: "lcd1232.ente-auth", name: "Ente Auth", marketplaceHearts: 0 }
@@ -84,20 +90,35 @@ test("a recorded heart is saved for the other surface", () => {  const entry = {
     Model, heartExited: true, heartOutputDone: true, pendingHeartEntry: entry,
     heartBusy: true, heartStarted: true, heartCode: 0,
     heartOutput: '{"recorded":true,"plugin":{"hearts":2}}', heartedIds: [],
-    setStatus() {}, saveHeartedId(id) { saved.push(id); return true },
+    flashed: [], flashStatus(text, err) { state.flashed.push([text, err]) },
+    saveHeartedId(id) { saved.push(id); return true },
     bumpCatalogCount() {}, loadCatalog() {},
   }
   callStore("finishHeart", state)
   assert.deepEqual(state.heartedIds, [entry.id])
   assert.deepEqual(saved, [entry.id])
+  assert.deepEqual(state.flashed, [['"Ente Auth" was liked.', false]])
 })
 
 test("hearted ids persist in a file both surfaces watch", () => {
   assert.match(source, /readonly property string heartsPath: Model\.heartsCachePath\(Quickshell\.env\("HOME"\)\)/)
   assert.match(source, /id: heartsFile[\s\S]*?onLoaded: root\.unionHearts\(text\(\)\)/)
-  assert.match(source, /onFileChanged: root\.unionHearts\(text\(\)\)/)
+  assert.match(source, /onFileChanged: if \(root\.unionHearts\(text\(\)\)\) root\.loadCatalog\(true\)/)
   assert.match(source, /watchChanges: root\.heartsPath !== ""/)
   assert.match(source, /id: heartSaveProc/)
   assert.match(source, /function unionHearts\(text\)/)
   assert.match(source, /function saveHeartedId\(id\)/)
+  assert.match(source, /return missing\.length > 0/)
+  // Star and like notices clear themselves; install and update traffic keeps
+  // the persistent path.
+  assert.match(source, /function flashStatus\(text, isError\)/)
+  assert.match(source, /id: flashTimer[\s\S]*?interval: 4000/)
+  assert.match(source, /if \(root\.status !== "" && root\.status === root\.flashedText\) root\.setStatus\("", false\)/)
+  for (const message of ["Checking the star for ", "Starred ", "Removed the star from ",
+    "Could not change the star for ", "was liked.", "was already liked.", "Could not like ", "Liking "]) {
+    assert.ok(source.includes(message), message)
+  }
+  assert.ok(!source.includes("Heart sent to ") && !source.includes("Heart already sent to ")
+    && !source.includes("Heart already counted") && !source.includes("Heart could not be sent")
+    && !source.includes("Sending a heart"), "no heart-worded notice remains")
 })

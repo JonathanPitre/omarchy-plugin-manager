@@ -128,6 +128,9 @@ Item {
   function loadEverything() {
     if (!opened || barMovePending) return
     store.loadOnOpen()
+    // The popup may have starred or liked since this window's cached fetch.
+    // Refreshing here is what makes those counts current on open.
+    if (root.browsing) store.loadCatalog(true)
   }
 
   Timer {
@@ -324,6 +327,11 @@ Item {
   // ---- Installed --------------------------------------------------------------
 
   property int selectedIndex: -1
+  // A star or a like rebuilds the grid's model, which drops the scroll offset
+  // back to the top. The click snapshots offset and focus; the rebuild lands
+  // back where the eye was.
+  property real pendingBrowseY: -1
+  property bool pendingBrowseFocus: false
   // What the lists filter on. It follows the search box after a short pause
   // rather than on every keystroke: each change rebuilds every visible row or
   // card, and a word typed at speed would rebuild them once per letter.
@@ -469,7 +477,19 @@ Item {
 
   property var detailsEntry: null
   readonly property bool detailsOpen: detailsEntry !== null
-  onCatalogChanged: if (detailsEntry) detailsEntry = Model.findRow(catalog, detailsEntry.id)
+  onCatalogChanged: {
+    if (detailsEntry) detailsEntry = Model.findRow(catalog, detailsEntry.id)
+    var restoreY = root.pendingBrowseY
+    var restoreFocus = root.pendingBrowseFocus
+    root.pendingBrowseY = -1
+    root.pendingBrowseFocus = false
+    if (restoreY >= 0 && root.browsing) {
+      Qt.callLater(function() {
+        catalogGrid.contentY = Math.min(restoreY, Math.max(0, catalogGrid.contentHeight - catalogGrid.height))
+        if (restoreFocus) catalogGrid.forceActiveFocus()
+      })
+    }
+  }
 
   // The details page is the third face of the flip: the grid turns over
   // into it, Back or Esc turns it back.
@@ -1592,8 +1612,16 @@ Item {
               root.selectedIndex = index
               root.askInstall(modelData)
             }
-            onStarRequested: store.toggleStar(modelData)
-            onHeartRequested: store.sendHeart(modelData)
+            onStarRequested: {
+              root.pendingBrowseY = catalogGrid.contentY
+              root.pendingBrowseFocus = catalogGrid.activeFocus
+              store.toggleStar(modelData)
+            }
+            onHeartRequested: {
+              root.pendingBrowseY = catalogGrid.contentY
+              root.pendingBrowseFocus = catalogGrid.activeFocus
+              store.sendHeart(modelData)
+            }
           }
         }
 
@@ -1667,8 +1695,16 @@ Item {
 
         onBackRequested: root.closeDetails()
         onInstallRequested: root.askInstall(root.detailsEntry)
-        onStarRequested: store.toggleStar(root.detailsEntry)
-        onHeartRequested: store.sendHeart(root.detailsEntry)
+        onStarRequested: {
+          root.pendingBrowseY = catalogGrid.contentY
+          root.pendingBrowseFocus = catalogGrid.activeFocus
+          store.toggleStar(root.detailsEntry)
+        }
+        onHeartRequested: {
+          root.pendingBrowseY = catalogGrid.contentY
+          root.pendingBrowseFocus = catalogGrid.activeFocus
+          store.sendHeart(root.detailsEntry)
+        }
         onGithubNavigationRequested: function(candidates, fallbackUrl) { root.requestGithubNavigation(candidates, fallbackUrl) }
         onRepositoryNavigationRequested: function(url) { root.navigateExternalUrl(url) }
         onPreviewUndecodable: root.previewsSupported = false

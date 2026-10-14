@@ -89,6 +89,11 @@ Panel {
   property alias loading: store.loading
   property alias loadError: store.loadError
   property int selectedIndex: -1
+  // A star or a like rebuilds the grid's model, which drops the scroll offset
+  // back to the top. The click snapshots offset and focus; the rebuild lands
+  // back where the eye was.
+  property real pendingBrowseY: -1
+  property bool pendingBrowseFocus: false
 
   property string groupFilter: "all"
   readonly property var groupOptions: Model.groupOptions()
@@ -436,7 +441,21 @@ Panel {
   // Every catalog the store publishes — a fresh fetch or a re-stamp after an
   // install — refreshes the open details entry from the same list the cards
   // are drawn from, so the details never describe a state the grid has left.
-  onCatalogChanged: if (detailsEntry) detailsEntry = Model.findRow(catalog, detailsEntry.id)
+  // A snapshot click restores the scroll offset (and the focus) the rebuild
+  // dropped; anything else leaves the grid where the new model put it.
+  onCatalogChanged: {
+    if (detailsEntry) detailsEntry = Model.findRow(catalog, detailsEntry.id)
+    var restoreY = root.pendingBrowseY
+    var restoreFocus = root.pendingBrowseFocus
+    root.pendingBrowseY = -1
+    root.pendingBrowseFocus = false
+    if (restoreY >= 0 && root.browsing) {
+      Qt.callLater(function() {
+        catalogGrid.contentY = Math.min(restoreY, Math.max(0, catalogGrid.contentHeight - catalogGrid.height))
+        if (restoreFocus) catalogGrid.forceActiveFocus()
+      })
+    }
+  }
   readonly property var selectedRow: selectedIndex >= 0 && selectedIndex < visibleRows.length
     ? visibleRows[selectedIndex]
     : null
@@ -1776,8 +1795,16 @@ Panel {
               root.selectedIndex = index
               root.askInstall(modelData)
             }
-            onStarRequested: store.toggleStar(modelData)
-            onHeartRequested: store.sendHeart(modelData)
+            onStarRequested: {
+              root.pendingBrowseY = catalogGrid.contentY
+              root.pendingBrowseFocus = catalogGrid.activeFocus
+              store.toggleStar(modelData)
+            }
+            onHeartRequested: {
+              root.pendingBrowseY = catalogGrid.contentY
+              root.pendingBrowseFocus = catalogGrid.activeFocus
+              store.sendHeart(modelData)
+            }
           }
         }
 
@@ -2247,8 +2274,16 @@ Panel {
           root.requestGithubNavigation(candidates, fallbackUrl)
         }
         onInstallRequested: root.askInstall(root.detailsEntry)
-        onStarRequested: store.toggleStar(root.detailsEntry)
-        onHeartRequested: store.sendHeart(root.detailsEntry)
+        onStarRequested: {
+          root.pendingBrowseY = catalogGrid.contentY
+          root.pendingBrowseFocus = catalogGrid.activeFocus
+          store.toggleStar(root.detailsEntry)
+        }
+        onHeartRequested: {
+          root.pendingBrowseY = catalogGrid.contentY
+          root.pendingBrowseFocus = catalogGrid.activeFocus
+          store.sendHeart(root.detailsEntry)
+        }
       }
 
       ActionConfirmDialog {
