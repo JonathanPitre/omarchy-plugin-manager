@@ -1358,6 +1358,13 @@ test("bulk update confirms once, then runs each bound step or skips it with a re
     "Updated 0, skipped 2 (Verified: Transaction limit: review x; Tip: stopped: transaction limit)")
 })
 
+test("the u key asks for a bulk update on the Installed tab of both surfaces", () => {
+  const panel = readFileSync(new URL("../Panel.qml", import.meta.url), "utf8")
+  assert.match(panel, /else if \(\(t === "u" \|\| t === "U"\) && !root\.browsing\) root\.askBulkUpdate\(\)/)
+  const expanded = readFileSync(new URL("../Expanded.qml", import.meta.url), "utf8")
+  assert.match(expanded, /else if \(\(text === "u" \|\| text === "U"\) && !root\.browsing\) \{ store\.askBulkUpdate\(\); event\.accepted = true \}/)
+})
+
 test("both update entry points require the displayed tuple and settled processes", () => {
   const store = readFileSync(new URL("../PluginStore.qml", import.meta.url), "utf8")
   const model = Function(source + "; return { pinnedRequest, unverifiedRequest, findRow, shortSha }")()
@@ -3415,6 +3422,7 @@ test("actionHints lists the row actions of each tab in the same hint shape", () 
   ])
   assert.deepEqual(Model.actionHints(false), [
     { key: "↵", text: "UPDATE", active: false },
+    { key: "u", text: "UPDATE ALL", active: false },
     { key: "⌦", text: "REMOVE", active: false },
     { key: "/", text: "SEARCH", active: false }
   ])

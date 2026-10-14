@@ -843,6 +843,7 @@ Panel {
         else if ((t === "c" || t === "C") && root.browsing) root.cycleCategoryFilter()
         else if ((t === "a" || t === "A") && root.browsing) root.cycleAvailabilityFilter()
         else if ((t === "t" || t === "T") && !root.browsing) root.cycleStatusFilter()
+        else if ((t === "u" || t === "U") && !root.browsing) root.askBulkUpdate()
         else if (t === "j") root.moveSelection(0, 1)
         else if (t === "k") root.moveSelection(0, -1)
         else if (t === "1") root.switchTab("installed")

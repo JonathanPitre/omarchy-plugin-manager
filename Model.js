@@ -1611,6 +1611,7 @@ function actionHints(browsing) {
   ]
   return [
     { key: "↵", text: "UPDATE", active: false },
+    { key: "u", text: "UPDATE ALL", active: false },
     { key: "⌦", text: "REMOVE", active: false },
     { key: "/", text: "SEARCH", active: false }
   ]

@@ -805,6 +805,7 @@ Item {
         else if ((text === "f" || text === "F")) root.browsing ? root.cycleCatalogKindFilter() : root.cycleKindFilter()
         else if ((text === "s" || text === "S")) root.browsing ? root.cycleCatalogSort() : root.cycleGroupFilter()
         else if ((text === "t" || text === "T") && !root.browsing) root.cycleStatusFilter()
+        else if ((text === "u" || text === "U") && !root.browsing) { store.askBulkUpdate(); event.accepted = true }
         else if ((text === "c" || text === "C") && root.browsing) root.cycleCategoryFilter()
         else if ((text === "a" || text === "A") && root.browsing) root.cycleAvailabilityFilter()
         else if (text === "/") { searchField.forceActiveFocus(); event.accepted = true }
