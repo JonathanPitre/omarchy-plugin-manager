@@ -768,7 +768,7 @@ Item {
     if (id === "") return false
     if (isHearted(id)) {
       loadCatalog(true)
-      flashStatus("\"" + entry.name + "\" was already liked.", false)
+      flashStatus(entry.name + " was already liked.", false)
       return true
     }
     var command = Model.heartPostCommand(id)
@@ -780,7 +780,7 @@ Item {
     heartOutput = ""
     heartStarted = false
     heartBusy = true
-    flashStatus("Liking \"" + entry.name + "\"…", false)
+    flashStatus("Liking " + entry.name + "…", false)
     heartProc.command = command
     heartProc.running = true
     return true
@@ -792,12 +792,12 @@ Item {
     pendingHeartEntry = null
     heartBusy = false
     if (!entry || !heartStarted || heartCode !== 0) {
-      if (entry) flashStatus("Could not like \"" + entry.name + "\". Try again.", true)
+      if (entry) flashStatus("Could not like " + entry.name + ". Try again.", true)
       return
     }
     var result = Model.parseHeartResult(heartOutput)
     if (result === "") {
-      flashStatus("Could not like \"" + entry.name + "\". Try again.", true)
+      flashStatus("Could not like " + entry.name + ". Try again.", true)
       return
     }
     // A repeat can outlive the cached count; fetch current totals without
@@ -809,8 +809,8 @@ Item {
     }
     if (result === "recorded") bumpCatalogCount(entry.id, "marketplaceHearts", 1)
     else loadCatalog(true)
-    flashStatus(result === "recorded" ? "\"" + entry.name + "\" was liked."
-      : "\"" + entry.name + "\" was already liked.", false)
+    flashStatus(result === "recorded" ? entry.name + " was liked."
+      : entry.name + " was already liked.", false)
   }
 
   // Best effort: memory already holds the id for this session, so a failed

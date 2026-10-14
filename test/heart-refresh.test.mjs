@@ -26,7 +26,7 @@ test("a repeated heart refreshes a stale zero from the authoritative catalog", (
   callStore("finishHeart", state)
   assert.equal(entry.marketplaceHearts, 1)
   assert.deepEqual(state.heartedIds, [entry.id])
-  assert.deepEqual(state.flashed, [['"Ente Auth" was already liked.', false]])
+  assert.deepEqual(state.flashed, [['Ente Auth was already liked.', false]])
 })
 
 test("a locally remembered heart still refreshes the count after catalog reload", () => {
@@ -39,7 +39,7 @@ test("a locally remembered heart still refreshes the count after catalog reload"
   }
   assert.equal(callStore("sendHeart", state, entry), true)
   assert.equal(entry.marketplaceHearts, 1)
-  assert.deepEqual(state.flashed, [['"Ente Auth" was already liked.', false]])
+  assert.deepEqual(state.flashed, [['Ente Auth was already liked.', false]])
 })
 
 test("parseHeartedIds keeps only valid ids, deduplicated, in order", () => {
@@ -81,7 +81,7 @@ test("a heart the other surface saved never POSTs again", () => {
   callStore("unionHearts", state, "other.surface.id\n")
   assert.equal(callStore("sendHeart", state, entry), true)
   assert.deepEqual(state.heartProc, {})
-  assert.deepEqual(state.flashed, [['"Other Surface" was already liked.', false]])
+  assert.deepEqual(state.flashed, [['Other Surface was already liked.', false]])
 })
 
 test("a recorded heart is saved for the other surface", () => {  const entry = { id: "lcd1232.ente-auth", name: "Ente Auth", marketplaceHearts: 0 }
@@ -97,7 +97,7 @@ test("a recorded heart is saved for the other surface", () => {  const entry = {
   callStore("finishHeart", state)
   assert.deepEqual(state.heartedIds, [entry.id])
   assert.deepEqual(saved, [entry.id])
-  assert.deepEqual(state.flashed, [['"Ente Auth" was liked.', false]])
+  assert.deepEqual(state.flashed, [['Ente Auth was liked.', false]])
 })
 
 test("hearted ids persist in a file both surfaces watch", () => {
