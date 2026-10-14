@@ -42,6 +42,57 @@ class UpdateDataTests(unittest.TestCase):
         self.assertEqual(list(self.home.iterdir()), [])
         self.assertEqual(self.updater.fds, [])
 
+    def write_shell_entry(self, entry, plugins_list=False):
+        self.root.mkdir(parents=True, exist_ok=True)
+        if plugins_list:
+            config = {"bar": {"layout": {"right": []}}, "plugins": [entry]}
+        else:
+            config = {"bar": {"layout": {"right": [entry]}}, "plugins": []}
+        (self.root / "shell.json").write_text(json.dumps(config))
+
+    def test_transaction_limit_override_from_shell_entry(self):
+        self.active.mkdir(parents=True, mode=0o700)
+        self.write_shell_entry({"id": "io.github.juancasanueva.plugin-manager", "transactionLimit": 16})
+        result = self.observe()
+        self.assertTrue(result["available"])
+        self.assertEqual(result["limit"], 16)
+        for number in range(16):
+            (self.active / str(number)).touch()
+        result = self.observe()
+        self.assertEqual((result["activeCount"], result["lowerBound"], result["limit"]), (16, False, 16))
+        (self.active / "16").touch()
+        result = self.observe()
+        self.assertEqual((result["activeCount"], result["lowerBound"]), (17, True))
+
+    def test_transaction_limit_override_from_plugins_list(self):
+        self.active.mkdir(parents=True, mode=0o700)
+        self.write_shell_entry({"id": "io.github.juancasanueva.plugin-manager", "transactionLimit": 64},
+                               plugins_list=True)
+        self.assertEqual(self.observe()["limit"], 64)
+
+    def test_transaction_limit_hostile_values_keep_default(self):
+        self.active.mkdir(parents=True, mode=0o700)
+        cases = [
+            {"id": "io.github.juancasanueva.plugin-manager", "transactionLimit": "64"},
+            {"id": "io.github.juancasanueva.plugin-manager", "transactionLimit": True},
+            {"id": "io.github.juancasanueva.plugin-manager", "transactionLimit": 7},
+            {"id": "io.github.juancasanueva.plugin-manager", "transactionLimit": 129},
+            {"id": "io.github.juancasanueva.plugin-manager", "transactionLimit": 32.0},
+            {"id": "io.github.juancasanueva.plugin-manager", "transactionLimit": None},
+            {"id": "other.plugin", "transactionLimit": 64},
+            {"id": "io.github.juancasanueva.plugin-manager"},
+        ]
+        for entry in cases:
+            with self.subTest(entry=entry):
+                self.write_shell_entry(entry)
+                result = self.observe()
+                self.assertTrue(result["available"])
+                self.assertEqual(result["limit"], 32)
+        (self.root / "shell.json").write_text("not json")
+        self.assertEqual(self.observe()["limit"], 32)
+        (self.root / "shell.json").unlink()
+        self.assertEqual(self.observe()["limit"], 32)
+
     def observe(self, updater=None):
         # These guards make any accidental update-path entry fail the test.
         with ExitStack() as stack:

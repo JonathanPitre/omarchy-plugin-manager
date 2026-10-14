@@ -2321,6 +2321,18 @@ class ArchivalTests(unittest.TestCase):
             self.preflight()
         self.assertEqual(len(list(self.state.iterdir())), 31)
 
+    def test_configured_limit_moves_archival_threshold(self):
+        self.fixture()
+        (self.omarchy / "shell.json").write_text(json.dumps(
+            {"bar": {"layout": {"right": [{"id": "io.github.juancasanueva.plugin-manager",
+                                           "transactionLimit": 8}]}}}))
+        for i in range(8):
+            self.history(i)
+        with patch.object(u.Updater, "git", side_effect=AssertionError("No history HEAD lookup")):
+            self.preflight()
+        self.assertEqual(list(self.state.iterdir()), [])
+        self.assertEqual(len(list(self.archive.iterdir())), 8)
+
     def test_mixed_history_repeated_pressure_and_archive_is_never_enumerated(self):
         self.fixture()
         self.fill(stop=31)
