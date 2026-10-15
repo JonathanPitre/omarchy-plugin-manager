@@ -1511,6 +1511,22 @@ class ArchivalTests(unittest.TestCase):
         self.assertIn("README", reason)
         self.assertLess(len(reason), 200)
 
+    def test_renumbered_device_histories_still_archive_at_capacity(self):
+        # btrfs may renumber st_dev across a reboot (issue #7); proven-success
+        # history must stay archivable or updates wedge at the cap forever.
+        self.fixture()
+        for i in range(32):
+            tx = self.history(i, "update" if i % 2 else "install")
+            path = tx / "prepared.json"
+            prepared = json.loads(path.read_text())
+            for pair in prepared.values():
+                pair[0] += 1
+            path.write_text(json.dumps(prepared))
+        with patch.object(u.Updater, "git", side_effect=AssertionError("No history HEAD lookup")):
+            self.preflight()
+        self.assertEqual(list(self.state.iterdir()), [])
+        self.assertEqual(len(list(self.archive.iterdir())), 32)
+
     def test_full_successful_histories_archive_without_rewriting_or_traversing_backups(self):
         for kind in ("install", "update"):
             for verified in (True, False):

@@ -1173,7 +1173,7 @@ class Updater:
             expected = {"status": "installed"}
         else:
             require(request["target"] != request["expectedLocalHead"], "Contradictory update target")
-            require(prepared["original"] != prepared["replacement"], "Contradictory identities")
+            require(prepared["original"][1] != prepared["replacement"][1], "Contradictory identities")
             checkout = checked_dir(tx, "checkout")
             try:
                 current = identity(checkout)

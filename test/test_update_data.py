@@ -360,9 +360,11 @@ class CompletedDeletionTests(unittest.TestCase):
         self.assert_sentinels()
 
     def test_zero_or_negative_prepared_identities_stay_refused(self):
+        # Install fixtures carry a single pair, so only the positivity guard
+        # can refuse; identical update pairs would trip "Contradictory" first.
         for count, (dev, ino) in enumerate(((0, 5), (-1, 5), (5, 0))):
             with self.subTest(dev=dev, ino=ino):
-                tx = self.fixture(60 + count)
+                tx = self.fixture(60 + count, install=True)
                 path = tx / "prepared.json"
                 doc = json.loads(path.read_text())
                 for pair in doc.values():
