@@ -1065,7 +1065,7 @@ Panel {
           // room for a labelled button, and the tooltip says the rest.
           PanelActionButton {
             id: expandButton
-            anchors.right: refreshButton.left
+            anchors.right: updateAllButton.visible ? updateAllButton.left : refreshButton.left
             anchors.rightMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             iconText: "󰊓"
@@ -1076,6 +1076,22 @@ Panel {
             enabled: !root.busy
             opacity: enabled ? 1 : 0.4
             onClicked: root.advanceOpenAs()
+          }
+
+          PanelActionButton {
+            id: updateAllButton
+            anchors.right: refreshButton.left
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            visible: !root.browsing
+            iconText: "󰑐"
+            fontSize: Style.font.display
+            tooltipText: "Update all"
+            foreground: root.contentForeground
+            fontFamily: root.contentFontFamily
+            enabled: root.updateActionsEnabled
+            opacity: root.bulkUpdatableCount > 0 && enabled ? 1 : 0.4
+            onClicked: root.askBulkUpdate()
           }
 
           PanelActionButton {
@@ -1128,23 +1144,17 @@ Panel {
           }
         }
 
-        // The count line gets the whole width on its own row under the
-        // title: beside it, the tabs and two icons left it elided, and
-        // "to update" was the part that got cut. The Update-all button
-        // shares the row on the Installed tab while updates are installable.
         Item {
           x: title.x
           width: parent.width - x
-          height: Math.max(subtitle.implicitHeight,
-            updateAllButton.visible ? updateAllButton.implicitHeight : 0)
+          height: subtitle.implicitHeight
 
           Text {
             id: subtitle
             // Never rich text: AutoText would fetch what a crafted string points at.
             textFormat: Text.PlainText
             anchors.left: parent.left
-            anchors.right: updateAllButton.visible ? updateAllButton.left : parent.right
-            anchors.rightMargin: updateAllButton.visible ? Style.space(8) : 0
+            anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             visible: text !== ""
             elide: Text.ElideRight
@@ -1166,21 +1176,6 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
-          Button {
-            id: updateAllButton
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            visible: !root.browsing && root.bulkUpdatableCount > 0
-            text: "Update all (" + root.bulkUpdatableCount + ")"
-            tooltipText: "Update every plugin with an installable update"
-            bordered: true
-            foreground: root.contentForeground
-            fontFamily: root.contentFontFamily
-            fontSize: Style.font.caption
-            enabled: root.updateActionsEnabled
-            opacity: enabled ? 1 : 0.4
-            onClicked: root.askBulkUpdate()
-          }
         }
 
         PanelSeparator { foreground: root.contentForeground }

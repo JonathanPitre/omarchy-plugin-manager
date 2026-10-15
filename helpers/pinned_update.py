@@ -95,6 +95,8 @@ MAX_DISK = 128 * 1024 * 1024
 TRANSACTION_LIMIT = 32
 ARCHIVE_NAME = "plugin-manager-updates-archive"
 MAX_UPDATE_STATUS = 8192
+MAX_BULK_REQUEST = 32768
+MAX_BULK_RESULT = 65536
 CAPACITY_REASON = ("Transaction limit: review ~/.config/omarchy/plugin-manager-updates "
                    "using README recovery guidance before retrying")
 ARCHIVE_REASON = ("Archive unsafe or incomplete: inspect active and archived transactions "
@@ -180,11 +182,16 @@ def request_value(value):
     # normalized request re-enters here through launch() and execute().
     value = {k: v for k, v in value.items() if k not in DERIVED}
     keys = set(value)
+    defer_reload = value.get("deferReload", False)
+    require(type(defer_reload) is bool, "Invalid reload setting")
+    if "deferReload" in keys:
+        keys.remove("deferReload")
     install = keys == {"schemaVersion", "id", "repository", "verifiedCommit", "section"}
     tip_install = keys == {"schemaVersion", "id", "repository", "branch", "section"}
     verified = keys == {"schemaVersion", "id", "repository", "verifiedCommit", "expectedLocalHead"}
     unverified = keys == {"schemaVersion", "id", "repository", "unverifiedCommit", "expectedLocalHead"}
     require(install or tip_install or verified or unverified, "Invalid request fields")
+    require("deferReload" not in value or verified or unverified, "Invalid reload setting")
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1, "Unsupported request")
     require(isinstance(value["id"], str) and ID.fullmatch(value["id"])
             and ".." not in value["id"] and not value["id"].startswith("omarchy."), "Invalid plugin id")
@@ -213,6 +220,24 @@ def request_value(value):
     return normalized
 
 
+def bulk_request_value(value):
+    require(type(value) is dict and set(value) == {"schemaVersion", "bulkUpdates"}
+            and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1,
+            "Invalid bulk update request")
+    updates = value["bulkUpdates"]
+    require(type(updates) is list and len(updates) > 0, "Invalid bulk update count")
+    normalized = []
+    ids = set()
+    for update in updates:
+        request = request_value(update)
+        require(not request["install"], "Bulk updates cannot install plugins")
+        require(request["id"] not in ids, "Duplicate bulk update")
+        ids.add(request["id"])
+        request["deferReload"] = True
+        normalized.append(request)
+    return {"schemaVersion": 1, "bulkUpdates": normalized}
+
+
 def catalog_request(value):
     """The one non-transaction shape: exactly a schema version and a force flag."""
     require(type(value) is dict and set(value) == {"schemaVersion", "catalog"}, "Invalid catalog request")
@@ -234,6 +259,8 @@ def request_kind(value):
         return "update"
     if "catalog" in value:
         return "catalog"
+    if "bulkUpdates" in value:
+        return "bulk-update"
     return "install" if "section" in value else "update"
 
 
@@ -1638,7 +1665,8 @@ class Updater:
             self.cancelled = False
             try:
                 self.checkpoint("after-exchange")
-                self.reload()
+                if not request.get("deferReload", False):
+                    self.reload()
             except Exception:
                 result["status"] = "updated; reload failed"
             create_file(self.tx, "result.json", json.dumps(result).encode())
@@ -1661,6 +1689,51 @@ class Updater:
             self.fds.clear()
 
 
+def execute_bulk_updates(requests, factory=Updater, prepare=None):
+    results = []
+    rescan = None
+    for request in requests:
+        updater = None
+        try:
+            updater = factory()
+            if prepare:
+                prepare(updater)
+            result = updater.execute(request)
+        except Exception as error:
+            reason = getattr(updater, "reason", "") or reason_text(error)
+            result = {"status": "unchanged; update refused", "reason": reason,
+                      "backup": getattr(updater, "backup", "")}
+        if updater:
+            try:
+                updater.notify(request, result)
+            except Exception:
+                pass
+        results.append({"id": request["id"], "status": result["status"],
+                        "reason": result.get("reason", "")})
+        if result["status"].startswith("updated"):
+            rescan = updater
+        if "Transaction limit" in result.get("reason", ""):
+            results.extend({"id": later["id"], "status": "unchanged; update refused",
+                            "reason": "Stopped: transaction limit"}
+                           for later in requests[len(results):])
+            break
+    rescan_result = "not needed"
+    if rescan is not None:
+        rescan_result = "failed"
+        for attempt in range(3):
+            if attempt:
+                time.sleep(0.25)
+            rescan.deadline = time.monotonic() + 10
+            rescan.cancelled = False
+            try:
+                rescan.reload()
+            except Exception:
+                continue
+            rescan_result = "complete"
+            break
+    return {"status": "bulk complete", "updates": results, "rescan": rescan_result}
+
+
 def launch(request, factory=Updater):
     """Separate the finite worker from its expendable UI observer."""
     read_end, write_end = os.pipe()
@@ -1677,40 +1750,54 @@ def launch(request, factory=Updater):
             os.dup2(null, fd)
         os.close(null)
         signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-        updater = factory()
-        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            signal.signal(sig, lambda *_: setattr(updater, "cancelled", True))
+        if request_kind(request) == "bulk-update":
+            active = {"updater": None}
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                signal.signal(sig, lambda *_: setattr(active["updater"], "cancelled", True)
+                              if active["updater"] is not None else None)
+            result = execute_bulk_updates(request["bulkUpdates"], factory,
+                                          lambda updater: active.update(updater=updater))
+        else:
+            updater = factory()
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                signal.signal(sig, lambda *_: setattr(updater, "cancelled", True))
+            try:
+                result = updater.execute(request)
+            except Exception as error:
+                reason = updater.reason or reason_text(error)
+                # A refused install replaced nothing, so it has no backup to name.
+                result = ({"status": "unchanged; install refused", "reason": reason}
+                          if request_kind(request) == "install"
+                          else {"status": "unchanged; update refused", "reason": reason,
+                                "backup": updater.backup})
+        output = memoryview(json.dumps(result).encode() + b"\n")
         try:
-            result = updater.execute(request)
-        except Exception as error:
-            reason = updater.reason or reason_text(error)
-            # A refused install replaced nothing, so it has no backup to name.
-            result = ({"status": "unchanged; install refused", "reason": reason}
-                      if request_kind(request) == "install"
-                      else {"status": "unchanged; update refused", "reason": reason,
-                            "backup": updater.backup})
-        try:
-            os.write(write_end, json.dumps(result).encode() + b"\n")
+            while output:
+                output = output[os.write(write_end, output):]
         except BrokenPipeError:
             pass
         os.close(write_end)
-        # Static, bounded notification text; no remote error prose reaches markup.
-        updater.notify(request, result)
+        if request_kind(request) != "bulk-update":
+            # Static, bounded notification text; no remote error prose reaches markup.
+            updater.notify(request, result)
         os._exit(0)
     os.close(write_end)
     os.waitpid(pid, 0)
     result = bytearray()
     with selectors.DefaultSelector() as poller:
         poller.register(read_end, selectors.EVENT_READ)
-        deadline = time.monotonic() + 140
+        count = len(request["bulkUpdates"]) if request_kind(request) == "bulk-update" else 1
+        deadline = time.monotonic() + 140 * count
         while time.monotonic() < deadline:
             if not poller.select(0.1):
                 continue
-            chunk = os.read(read_end, 4097 - len(result))
+            limit = MAX_BULK_RESULT if request_kind(request) == "bulk-update" else 4096
+            chunk = os.read(read_end, limit + 1 - len(result))
             if not chunk:
                 break
             result.extend(chunk)
-            require(len(result) <= 4096, "Worker result exceeds limit")
+            limit = MAX_BULK_RESULT if request_kind(request) == "bulk-update" else 4096
+            require(len(result) <= limit, "Worker result exceeds limit")
     os.close(read_end)
     if result:
         sys.stdout.buffer.write(result)
@@ -1775,8 +1862,8 @@ if __name__ == "__main__":
     kind = "update"
     try:
         os.umask(0o077)
-        require(len(sys.argv) == 2 and len(sys.argv[1]) <= 2048, "One bounded request required")
-        raw_request = document(sys.argv[1].encode(), 2048)
+        require(len(sys.argv) == 2 and len(sys.argv[1]) <= MAX_BULK_REQUEST, "One bounded request required")
+        raw_request = document(sys.argv[1].encode(), MAX_BULK_REQUEST)
         kind = request_kind(raw_request)
         if kind == "catalog":
             # In-process and streamed: the projection is far larger than the
@@ -1786,7 +1873,10 @@ if __name__ == "__main__":
             sys.stdout.buffer.write(Updater().serve_catalog(raw_request))
             sys.stdout.flush()
         else:
-            launch(request_value(raw_request))
+            require(kind == "bulk-update" or len(sys.argv[1].encode()) <= 2048,
+                    "One bounded request required")
+            request = bulk_request_value(raw_request) if kind == "bulk-update" else request_value(raw_request)
+            launch(request)
     except Exception as error:
         if kind == "catalog":
             print(reason_text(error), file=sys.stderr)

@@ -950,12 +950,9 @@ Item {
   // be held to exactly that commit.
   property string pendingUnverifiedSha: ""
 
-  // Bulk update ("Update all"): one confirmation for every installable row,
-  // then sequential steps through runUpdate. bulkQueue holds the bound
-  // {id, name, kind, targetSha} entries; bulkResults collects one
-  // {id, name, ok, reason} per step for the closing summary.
   property var bulkQueue: []
   property var bulkResults: []
+  property var bulkPendingRequests: []
   property bool bulkActive: false
   readonly property int bulkUpdatableCount: Model.bulkUpdateCandidates(rows).length
 
@@ -1025,18 +1022,17 @@ Item {
     return true
   }
 
-  // Next bound step, or a skip with a reason when the row moved under the
-  // question. Serialized through pinnedProc like every other update.
   function startNextBulk() {
     if (!bulkActive) return
-    while (bulkQueue.length > 0) {
+    var requests = []
+    for (var i = 0; i < bulkQueue.length; i++) {
       if (busy || pinnedProc.running || actionProc.running
           || !root.loadProcessSettled() || !root.updateProcessSettled()) {
-        bulkResults.push({ id: bulkQueue[0].id, name: bulkQueue[0].name, ok: false, reason: "interrupted" })
-        bulkQueue = bulkQueue.slice(1)
-        continue
+        for (var j = i; j < bulkQueue.length; j++)
+          bulkResults.push({ id: bulkQueue[j].id, name: bulkQueue[j].name, ok: false, reason: "interrupted" })
+        break
       }
-      var step = bulkQueue[0]
+      var step = bulkQueue[i]
       var row = Model.findRow(rows, step.id)
       var request = row ? updateRequest(row) : null
       var bound = !!row && !!request
@@ -1047,57 +1043,101 @@ Item {
         bulkResults.push({ id: step.id, name: step.name, ok: false,
           reason: !row ? "no longer in the list" : (!request ? "no installable update"
             : (step.kind === "verified" ? "the verified snapshot moved" : "the upstream tip moved")) })
-        bulkQueue = bulkQueue.slice(1)
         continue
       }
-      runUpdate(row)
-      if (!pinnedProc.running) {
-        // Refused between gate and launch: record it and move on, never stall.
-        bulkResults.push({ id: step.id, name: step.name, ok: false, reason: "no installable update" })
-        bulkQueue = bulkQueue.slice(1)
-        continue
-      }
-      return
+      requests.push(request)
     }
-    finishBulk()
+    if (requests.length > 0) runBulkUpdates(requests)
+    else finishBulk()
   }
 
-  // One step landed. A capacity refusal ends the run: retrying would fail the
-  // same way, so the rest are skipped, not looped.
-  function finishBulkStep(changed, outcome, reason) {
-    var step = bulkQueue.length > 0 ? bulkQueue[0] : null
-    bulkQueue = bulkQueue.slice(1)
-    if (step) bulkResults.push({ id: step.id, name: step.name, ok: changed,
-      reason: changed ? "" : (reason !== "" ? reason : outcome) })
-    var kind = busyKind
-    var label = busyId
-    busyKind = ""
-    busyId = ""
-    busyRowId = ""
-    pinnedOutput = ""
-    root.actionFinished(kind, label, changed ? 0 : 1)
-    if (!changed && Model.isCapacityRefusal(reason + " " + outcome)) {
-      for (var i = 0; i < bulkQueue.length; i++)
-        bulkResults.push({ id: bulkQueue[i].id, name: bulkQueue[i].name, ok: false, reason: "stopped: transaction limit" })
-      bulkQueue = []
-    }
-    if (bulkQueue.length > 0) {
-      startNextBulk()
+  function runBulkUpdates(requests) {
+    bulkPendingRequests = requests
+    bulkRescanFailed = false
+    if (busy || pinnedProc.running || actionProc.running) {
+      for (var i = 0; i < requests.length; i++) {
+        var row = Model.findRow(rows, requests[i].id)
+        bulkResults.push({ id: requests[i].id, name: row ? row.name : requests[i].id,
+          ok: false, reason: "interrupted" })
+      }
+      finishBulk()
       return
     }
-    finishBulk()
+    busyRowId = ""
+    busyId = "Update all"
+    busyKind = "bulk-update"
+    pinnedOutput = ""
+    pinnedExited = false
+    pinnedOverflow = false
+    setStatus("Updating " + requests.length + " plugins; closing this window does not cancel it", false)
+    pinnedProc.command = ["/usr/bin/env", "-i", "--", "PATH=/usr/bin:/bin",
+      "WAYLAND_DISPLAY=" + String(Quickshell.env("WAYLAND_DISPLAY") || ""),
+      "/usr/bin/python3", "-I", "-S", pinnedHelperPath,
+      JSON.stringify({ schemaVersion: 1, bulkUpdates: requests })]
+    pinnedProc.running = true
   }
 
   function finishBulk() {
     bulkQueue = []
+    bulkPendingRequests = []
     bulkActive = false
+    busyKind = ""
+    busyId = ""
+    busyRowId = ""
     var skipped = 0
     for (var i = 0; i < bulkResults.length; i++) if (bulkResults[i].ok !== true) skipped++
-    setStatus(Model.bulkUpdateSummary(bulkResults), skipped > 0)
+    var rescanFailed = bulkRescanFailed
+    setStatus(Model.bulkUpdateSummary(bulkResults)
+      + (rescanFailed ? "; shell did not reload the updated plugins" : ""), skipped > 0 || rescanFailed)
+    bulkRescanFailed = false
     pendingUpdateReport = ""
-    rows = Model.applyPinnedUpdates(Model.applyUpdateReport(rows, {}), null, allowUnverifiedUpdates)
-    root.requestFreshUpdateCycle()
-    root.refreshUpdateData()
+    if (rescanFailed) rows = Model.applyPinnedUpdates(rows, null, allowUnverifiedUpdates)
+    else rows = Model.applyPinnedUpdates(Model.applyUpdateReport(rows, {}), null, allowUnverifiedUpdates)
+    root.actionFinished("bulk-update", "Update all", skipped > 0 || rescanFailed ? 1 : 0)
+    if (!rescanFailed) {
+      root.requestFreshUpdateCycle()
+      root.refreshUpdateData()
+    }
+  }
+
+  function finishBulkProcess() {
+    var outcomes = Object.create(null)
+    var resultsById = Object.create(null)
+    var stepsById = Object.create(null)
+    var processFailure = ""
+    for (var i = 0; i < bulkQueue.length; i++) stepsById[bulkQueue[i].id] = bulkQueue[i]
+    for (var j = 0; j < bulkResults.length; j++) resultsById[bulkResults[j].id] = bulkResults[j]
+    try {
+      var result = JSON.parse(pinnedOutput)
+      if (!pinnedOverflow && result && result.status === "bulk complete" && Array.isArray(result.updates)) {
+        bulkRescanFailed = result.rescan === "failed"
+        for (var j = 0; j < result.updates.length; j++) {
+          var update = result.updates[j]
+          if (update && typeof update.id === "string" && typeof update.status === "string")
+            outcomes[update.id] = update
+        }
+      } else if (!pinnedOverflow && result && result.status === "unchanged; request refused") {
+        processFailure = typeof result.reason === "string"
+          ? result.reason.replace(/[^\x20-\x7e]/g, "").slice(0, 200) : result.status
+      }
+    } catch (error) {}
+    for (var k = 0; k < bulkPendingRequests.length; k++) {
+      var request = bulkPendingRequests[k]
+      var step = stepsById[request.id]
+      if (!step) continue
+      var outcome = outcomes[request.id]
+      var status = outcome ? outcome.status : (processFailure || "outcome unknown; inspect retained transactions")
+      var reason = outcome && typeof outcome.reason === "string"
+        ? outcome.reason.replace(/[^\x20-\x7e]/g, "").slice(0, 200) : status
+      var changed = status === "updated"
+      resultsById[step.id] = { id: step.id, name: step.name, ok: changed,
+        reason: changed ? "" : (reason || status) }
+    }
+    bulkResults = []
+    for (var n = 0; n < bulkQueue.length; n++)
+      if (resultsById[bulkQueue[n].id]) bulkResults.push(resultsById[bulkQueue[n].id])
+    pinnedOutput = ""
+    finishBulk()
   }
 
   readonly property string pinnedHelperPath:
@@ -1105,6 +1145,7 @@ Item {
   property string pinnedOutput: ""
   property bool pinnedExited: false
   property bool pinnedOverflow: false
+  property bool bulkRescanFailed: false
 
   function runUpdate(row) {
     if (!canStartUpdate(row) || actionProc.running) return
@@ -1125,11 +1166,13 @@ Item {
     pinnedProc.running = true
   }
 
-  // Both helper shapes land here: the same bounded result, the same statuses
-  // read from a fixed list, and the same refusal to report anything the
-  // helper did not say. Only the words differ.
   function finishPinnedUpdate() {
-    if (!pinnedExited || (busyKind !== "update" && busyKind !== "install")) return
+    if (!pinnedExited) return
+    if (busyKind === "bulk-update") {
+      finishBulkProcess()
+      return
+    }
+    if (busyKind !== "update" && busyKind !== "install") return
     var installing = busyKind === "install"
     var done = installing ? "installed" : "updated"
     var outcome = "outcome unknown; inspect retained transactions"
@@ -1151,10 +1194,6 @@ Item {
     var changed = outcome.indexOf(done) === 0
     var kind = busyKind
     var label = busyId
-    if (bulkActive && !installing) {
-      finishBulkStep(changed, outcome, reason)
-      return
-    }
     busyKind = ""
     busyId = ""
     busyRowId = ""
@@ -1735,7 +1774,7 @@ Item {
     stdout: SplitParser {
       splitMarker: ""
       onRead: function(chunk) {
-        if (root.pinnedOutput.length + chunk.length > 4096) {
+        if (root.pinnedOutput.length + chunk.length > 65536) {
           root.pinnedOverflow = true
           root.pinnedOutput = ""
         } else if (!root.pinnedOverflow) root.pinnedOutput += chunk

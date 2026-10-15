@@ -182,6 +182,110 @@ class TransactionTests(unittest.TestCase):
         updater.notify(u.request_value(self.request), result)
         self.assertEqual(calls[0][3], "Pinned plugin update")
 
+    def test_bulk_update_can_defer_shell_reload_until_the_queue_finishes(self):
+        request = {**self.request, "deferReload": True}
+        result = self.updater().execute(request)
+        self.assertEqual(result["status"], "updated")
+        self.assertFalse(self.reloaded)
+        journaled = json.loads((Path(result["backup"]).parent / "request.json").read_text())
+        self.assertEqual(journaled, request)
+        self.assertTrue(u.request_value(request)["deferReload"])
+        with self.assertRaises(u.Refused):
+            u.request_value({**self.install, "deferReload": True})
+        with self.assertRaises(u.Refused):
+            u.request_value({**self.request, "deferReload": "true"})
+
+    def test_detached_bulk_executor_finishes_bound_updates_after_publication_reload(self):
+        requests = [
+            dict(schemaVersion=1, id="acme.plugin", repository=REPO,
+                 verifiedCommit=self.target, expectedLocalHead=self.base),
+            dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                 unverifiedCommit=self.new_tip, expectedLocalHead=self.new_base),
+            dict(schemaVersion=1, id="acme.third", repository=REPO,
+                 verifiedCommit=self.target, expectedLocalHead=self.base),
+            dict(schemaVersion=1, id="acme.fourth", repository=REPO,
+                 verifiedCommit=self.target, expectedLocalHead=self.base),
+        ]
+        calls = []
+
+        class FixtureUpdater:
+            def __init__(self):
+                self.deadline = time.monotonic() + 100
+                self.cancelled = False
+
+            def execute(self, request):
+                calls.append((request["id"], request["deferReload"]))
+                if request["id"] in ("acme.third", "acme.fourth"):
+                    raise u.Refused("Target moved")
+                return {"status": "updated"}
+
+            def notify(self, request, result):
+                if request["id"] in ("acme.plugin", NEW_ID):
+                    self.deadline = 0
+
+            def reload(self):
+                self.assert_fresh_deadline()
+                calls.append(("rescan", None))
+
+            def assert_fresh_deadline(self):
+                if self.deadline <= time.monotonic():
+                    raise u.Refused("Expired deadline")
+
+        result = u.execute_bulk_updates(u.bulk_request_value({"schemaVersion": 1,
+                                                              "bulkUpdates": requests})["bulkUpdates"], FixtureUpdater)
+        self.assertEqual(calls, [("acme.plugin", True), (NEW_ID, True), ("acme.third", True),
+                                 ("acme.fourth", True), ("rescan", None)])
+        self.assertEqual([item["status"] for item in result["updates"]],
+                         ["updated", "updated", "unchanged; update refused", "unchanged; update refused"])
+        self.assertEqual(result["rescan"], "complete")
+
+    def test_detached_bulk_executor_retries_failed_shell_rescan(self):
+        calls = []
+        failures = [1]
+
+        class FixtureUpdater:
+            def __init__(self):
+                self.deadline = time.monotonic() + 100
+                self.cancelled = False
+
+            def execute(self, request):
+                return {"status": "updated"}
+
+            def notify(self, request, result):
+                pass
+
+            def reload(self):
+                calls.append(self.deadline > time.monotonic())
+                if len(calls) <= failures[0]:
+                    raise u.Refused("Shell is still starting")
+
+        result = u.execute_bulk_updates([u.request_value(self.request)], FixtureUpdater)
+        self.assertEqual(calls, [True, True])
+        self.assertEqual(result["rescan"], "complete")
+
+        calls.clear()
+        failures[0] = 3
+        result = u.execute_bulk_updates([u.request_value(self.request)], FixtureUpdater)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(result["rescan"], "failed")
+
+    def test_bulk_request_binds_unique_updates_and_rejects_installs(self):
+        requests = u.bulk_request_value({"schemaVersion": 1,
+            "bulkUpdates": [self.request, dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                unverifiedCommit=self.new_tip, expectedLocalHead=self.new_base)]})
+        self.assertEqual([item["id"] for item in requests["bulkUpdates"]], ["acme.plugin", NEW_ID])
+        self.assertTrue(all(item["deferReload"] for item in requests["bulkUpdates"]))
+        with self.assertRaises(u.Refused):
+            u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [self.request, self.request]})
+        with self.assertRaises(u.Refused):
+            u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [self.install]})
+        with self.assertRaises(u.Refused):
+            u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": []})
+        many = [dict(schemaVersion=1, id=f"acme.plugin-{index}", repository=REPO,
+                     verifiedCommit=self.target, expectedLocalHead=self.base) for index in range(40)]
+        self.assertEqual(len(u.bulk_request_value({"schemaVersion": 1,
+                                                    "bulkUpdates": many})["bulkUpdates"]), 40)
+
     def test_unverified_request_keeps_every_other_refusal(self):
         # A non-fast-forward target refuses exactly as a verified one would.
         self.git("-C", str(self.remote), "checkout", "-q", "--detach", self.base)

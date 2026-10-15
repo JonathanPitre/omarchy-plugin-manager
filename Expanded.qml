@@ -816,14 +816,12 @@ Item {
         }
       }
 
-      // ---- Header: what this is, the tabs, and the two icons.
       Item {
         id: header
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        height: Math.max(title.implicitHeight, refreshButton.height,
-          updateAllButton.visible ? updateAllButton.implicitHeight : 0)
+        height: Math.max(title.implicitHeight, refreshButton.height)
 
         Text {
           id: titleIcon
@@ -976,23 +974,6 @@ Item {
           }
         }
 
-        Button {
-          id: updateAllButton
-          anchors.right: tabs.left
-          anchors.rightMargin: Style.space(10)
-          anchors.verticalCenter: parent.verticalCenter
-          visible: !root.browsing && root.bulkUpdatableCount > 0
-          text: "Update all (" + root.bulkUpdatableCount + ")"
-          tooltipText: "Update every plugin with an installable update"
-          bordered: true
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          fontSize: Style.font.caption
-          enabled: root.updateActionsEnabled && !root.barMovePending
-          opacity: enabled ? 1 : 0.4
-          onClicked: store.askBulkUpdate()
-        }
-
         ButtonGroup {
           id: tabs
           enabled: !root.barMovePending
@@ -1060,7 +1041,7 @@ Item {
           id: collapseButton
           enabled: !root.barMovePending && !root.busy
           opacity: enabled ? 1 : 0.4
-          anchors.right: refreshButton.left
+          anchors.right: updateAllButton.visible ? updateAllButton.left : refreshButton.left
           anchors.rightMargin: Style.space(6)
           anchors.verticalCenter: parent.verticalCenter
           iconText: "󰊔"
@@ -1069,6 +1050,22 @@ Item {
           foreground: root.foreground
           fontFamily: root.fontFamily
           onClicked: root.backToPopup()
+        }
+
+        PanelActionButton {
+          id: updateAllButton
+          anchors.right: refreshButton.left
+          anchors.rightMargin: Style.space(6)
+          anchors.verticalCenter: parent.verticalCenter
+          visible: !root.browsing
+          iconText: "󰑐"
+          fontSize: Style.font.display
+          tooltipText: "Update all"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          enabled: root.updateActionsEnabled && !root.barMovePending
+          opacity: root.bulkUpdatableCount > 0 && enabled ? 1 : 0.4
+          onClicked: store.askBulkUpdate()
         }
 
         PanelActionButton {
