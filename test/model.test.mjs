@@ -3555,15 +3555,16 @@ test("the header refresh button is display-sized and spins instead of greying wh
   const button = panel.slice(panel.indexOf("id: refreshButton"), panel.indexOf("id: refreshSpinner"))
   assert.match(button, /fontSize: Style\.font\.display/)
   // The button's own glyph steps aside while refreshing; the spinner takes its place.
-  assert.match(button, /iconText: root\.refreshing \? "" : "󰑓"/)
+  assert.match(button, /iconText: root\.refreshing \? "" : "󰉹"/)
   assert.doesNotMatch(button, /opacity: enabled \? 1 : 0\.4/)
   assert.match(button, /opacity: root\.busy \? 0\.4 : 1/)
 
   const spinner = panel.slice(panel.indexOf("id: refreshSpinner"), panel.indexOf("id: refreshSpinner") + 800)
   assert.match(spinner, /visible: root\.refreshing/)
   assert.match(spinner, /text: "󰑓"/)
-  // The header re-read glyph is distinct from the per-row update arrow.
-  assert.doesNotMatch(button, /"󰑐"/)
+  // The header re-read glyph is a list mark, distinct from the per-row update
+  // arrow; the small badge overlays it at reduced size and hides while refreshing.
+  assert.match(button, /visible: !root\.refreshing[\s\S]*?text: "󰑐"[\s\S]*?Math\.round\(refreshButton\.fontSize \* 0\.55\)/)
   assert.match(spinner, /textFormat: Text\.PlainText/)
   assert.match(spinner, /RotationAnimation on rotation \{[\s\S]*?running: root\.refreshing[\s\S]*?from: 0[\s\S]*?to: 360[\s\S]*?direction: RotationAnimation\.Clockwise[\s\S]*?loops: Animation\.Infinite/)
 })
