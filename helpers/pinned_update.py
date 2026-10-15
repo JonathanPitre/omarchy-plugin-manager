@@ -97,6 +97,12 @@ ARCHIVE_NAME = "plugin-manager-updates-archive"
 MAX_UPDATE_STATUS = 8192
 MAX_BULK_REQUEST = 32768
 MAX_BULK_RESULT = 65536
+UPDATE_RESULT_TIMEOUT = 140
+BULK_RESCAN_ATTEMPTS = 3
+BULK_RESCAN_TIMEOUT = 10
+BULK_RESCAN_PAUSE = 0.25
+BULK_RESCAN_ALLOWANCE = (BULK_RESCAN_ATTEMPTS * BULK_RESCAN_TIMEOUT
+                         + (BULK_RESCAN_ATTEMPTS - 1) * BULK_RESCAN_PAUSE + 1)
 CAPACITY_REASON = ("Transaction limit: review ~/.config/omarchy/plugin-manager-updates "
                    "using README recovery guidance before retrying")
 ARCHIVE_REASON = ("Archive unsafe or incomplete: inspect active and archived transactions "
@@ -1720,10 +1726,10 @@ def execute_bulk_updates(requests, factory=Updater, prepare=None):
     rescan_result = "not needed"
     if rescan is not None:
         rescan_result = "failed"
-        for attempt in range(3):
+        for attempt in range(BULK_RESCAN_ATTEMPTS):
             if attempt:
-                time.sleep(0.25)
-            rescan.deadline = time.monotonic() + 10
+                time.sleep(BULK_RESCAN_PAUSE)
+            rescan.deadline = time.monotonic() + BULK_RESCAN_TIMEOUT
             rescan.cancelled = False
             try:
                 rescan.reload()
@@ -1732,6 +1738,10 @@ def execute_bulk_updates(requests, factory=Updater, prepare=None):
             rescan_result = "complete"
             break
     return {"status": "bulk complete", "updates": results, "rescan": rescan_result}
+
+
+def bulk_result_timeout(count):
+    return UPDATE_RESULT_TIMEOUT * count + BULK_RESCAN_ALLOWANCE
 
 
 def launch(request, factory=Updater):
@@ -1786,8 +1796,9 @@ def launch(request, factory=Updater):
     result = bytearray()
     with selectors.DefaultSelector() as poller:
         poller.register(read_end, selectors.EVENT_READ)
-        count = len(request["bulkUpdates"]) if request_kind(request) == "bulk-update" else 1
-        deadline = time.monotonic() + 140 * count
+        is_bulk = request_kind(request) == "bulk-update"
+        count = len(request["bulkUpdates"]) if is_bulk else 1
+        deadline = time.monotonic() + (bulk_result_timeout(count) if is_bulk else UPDATE_RESULT_TIMEOUT)
         while time.monotonic() < deadline:
             if not poller.select(0.1):
                 continue

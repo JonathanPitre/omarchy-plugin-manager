@@ -240,6 +240,9 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(result["rescan"], "complete")
 
     def test_detached_bulk_executor_retries_failed_shell_rescan(self):
+        rescan_budget = (u.BULK_RESCAN_ATTEMPTS * u.BULK_RESCAN_TIMEOUT
+                         + (u.BULK_RESCAN_ATTEMPTS - 1) * u.BULK_RESCAN_PAUSE)
+        self.assertGreaterEqual(u.bulk_result_timeout(1) - u.UPDATE_RESULT_TIMEOUT, rescan_budget)
         calls = []
         failures = [1]
 
@@ -266,7 +269,7 @@ class TransactionTests(unittest.TestCase):
         calls.clear()
         failures[0] = 3
         result = u.execute_bulk_updates([u.request_value(self.request)], FixtureUpdater)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), u.BULK_RESCAN_ATTEMPTS)
         self.assertEqual(result["rescan"], "failed")
 
     def test_bulk_request_binds_unique_updates_and_rejects_installs(self):
