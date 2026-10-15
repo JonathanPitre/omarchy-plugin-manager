@@ -384,7 +384,7 @@ Panel {
   // Hand over to the expanded window on the tab you were looking at. Close
   // first: the popup and the panel are never up together. A bar without a
   // shell reference (tests, odd hosts) makes this a no-op rather than a throw.
-  function expand(page) {
+  function expand(page, mode) {
     if (!bar || !bar.shell || typeof bar.shell.summon !== "function") return
     var tab = activeTab
     // Name the output this popup sits on so the expanded window opens on the
@@ -393,7 +393,45 @@ Panel {
     revokeReleaseNavigation()
     closeArrange()
     close()
-    bar.shell.summon(pluginId, JSON.stringify({ tab: tab, screen: screenName, page: page === "arrange" ? "arrange" : "" }))
+    var payload = { tab: tab, screen: screenName, page: page === "arrange" ? "arrange" : "" }
+    if (mode === "overlay" || mode === "window") payload.mode = mode
+    bar.shell.summon(pluginId, JSON.stringify(payload))
+  }
+
+  // The corner button: the next form after the popup is the overlay, and
+  // choosing it is also how it is remembered. The mode rides in the summon
+  // because the write may not have reached shell.json when the panel reads it.
+  // A setting that could not be written opens nothing, so what shows and what
+  // is saved never part.
+  function advanceOpenAs() {
+    if (!store.setOpenAs("overlay")) return
+    expand("", "overlay")
+  }
+
+  // Straight to the window, without passing through the overlay.
+  function openAsWindow() {
+    if (!store.setOpenAs("window")) return
+    expand("", "window")
+  }
+
+  // A click on the bar opens whichever form was chosen last. Read from
+  // shell.json rather than the store, which has not loaded before the first
+  // open; the same blocking read the expanded window makes for the same reason.
+  function openFromBar() {
+    if (opened) { close(); return }
+    configView.reload()
+    var mode = Model.openAs(Model.parseSelfSettings(
+      Model.selfEntryFromShellConfig(configView.text(), pluginId)))
+    if (mode === "popup") open()
+    else expand("", mode)
+  }
+
+  FileView {
+    id: configView
+    path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
+    preload: false
+    blockAllReads: true
+    printErrors: false
   }
 
   function switchTab(tab) {
@@ -988,7 +1026,7 @@ Panel {
           // same switch the expanded window shows, reached from here too.
           PanelActionButton {
             id: settingsButton
-            anchors.right: expandButton.left
+            anchors.right: windowButton.left
             anchors.rightMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             iconText: "󰒓"
@@ -999,6 +1037,21 @@ Panel {
             enabled: !root.busy
             opacity: enabled ? 1 : 0.4
             onClicked: root.settingsOpen ? root.closeSettings() : root.openSettings()
+          }
+
+          PanelActionButton {
+            id: windowButton
+            anchors.right: expandButton.left
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "\uf2d0"
+            fontSize: Style.font.display
+            tooltipText: "Open as a window"
+            foreground: root.contentForeground
+            fontFamily: root.contentFontFamily
+            enabled: !root.busy
+            opacity: enabled ? 1 : 0.4
+            onClicked: root.openAsWindow()
           }
 
           // Icon only, like the refresh beside it: the popup's header has no
@@ -1015,7 +1068,7 @@ Panel {
             fontFamily: root.contentFontFamily
             enabled: !root.busy
             opacity: enabled ? 1 : 0.4
-            onClicked: root.expand()
+            onClicked: root.advanceOpenAs()
           }
 
           PanelActionButton {
@@ -2099,68 +2152,6 @@ Panel {
               PanelToolTip {
                 visible: unverifiedInstallSwitch.containsMouse
                 text: store.allowUnverifiedInstalls ? "Unverified listings can be installed" : "Only verified listings can be installed"
-                fontFamily: root.contentFontFamily
-              }
-            }
-          }
-
-          // Which window the expanded panel opens as. The window is chosen at
-          // open time, so the switch is a decision about the next one.
-          Rectangle {
-            width: parent.width
-            height: Math.max(tiledPanelText.implicitHeight, tiledPanelSwitch.implicitHeight) + Style.space(12) * 2
-            radius: Style.cornerRadius
-            color: Style.normalFill
-            border.width: 1
-            border.color: Qt.alpha(root.secondaryForeground, 0.35)
-
-            Column {
-              id: tiledPanelText
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(12)
-              anchors.right: tiledPanelSwitch.left
-              anchors.rightMargin: Style.space(16)
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(4)
-
-              Text {
-                // Never rich text: AutoText would fetch what a crafted string points at.
-                textFormat: Text.PlainText
-                width: parent.width
-                text: "Open expanded panel as a tiled window"
-                color: root.contentForeground
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.body
-                wrapMode: Text.WordWrap
-              }
-
-              Text {
-                // Never rich text: AutoText would fetch what a crafted string points at.
-                textFormat: Text.PlainText
-                width: parent.width
-                text: "Off: the expanded panel is an overlay above everything, closed by Esc or a click outside. "
-                  + "On: it opens as a regular window that Hyprland tiles in the current workspace, so it can sit beside a terminal. Takes effect on the next open."
-                color: root.secondaryForeground
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-            }
-
-            ToggleSwitch {
-              id: tiledPanelSwitch
-              anchors.right: parent.right
-              anchors.rightMargin: Style.space(12)
-              anchors.verticalCenter: parent.verticalCenter
-              checked: store.tiledExpandedPanel
-              interactive: true
-              busy: root.busy
-              foreground: root.contentForeground
-              onToggled: store.setTiledExpandedPanel(!store.tiledExpandedPanel)
-
-              PanelToolTip {
-                visible: tiledPanelSwitch.containsMouse
-                text: store.tiledExpandedPanel ? "The expanded panel opens as a tiled window" : "The expanded panel opens as an overlay"
                 fontFamily: root.contentFontFamily
               }
             }

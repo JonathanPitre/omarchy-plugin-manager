@@ -142,10 +142,11 @@ Item {
   readonly property bool allowUnverifiedInstalls: Model.allowUnverifiedInstalls(selfSettings)
   onAllowUnverifiedInstallsChanged: restampCatalog()
 
-  // Which window the expanded panel opens as. Held here so both settings panes
-  // can show and flip it; the expanded window does not read it from here,
-  // because it has to know before this store's first load has run.
-  readonly property bool tiledExpandedPanel: Model.tiledExpandedPanel(selfSettings)
+  // How the manager opens: popup, overlay or window. Held here so the corner
+  // buttons can show and advance it; the bar click and the expanded window
+  // read it from shell.json instead, because they need it before this store's
+  // first load has run.
+  readonly property string openAs: Model.openAs(selfSettings)
 
   // Persist one setting through the host, merged over the entry as it was
   // loaded. The local copies move only when the host accepted the write; the
@@ -181,8 +182,32 @@ Item {
     return writeSelfSetting("allowUnverifiedInstalls", value, allowUnverifiedInstalls)
   }
 
-  function setTiledExpandedPanel(value) {
-    return writeSelfSetting("tiledExpandedPanel", value, tiledExpandedPanel)
+  // Same guards as a switch, for the one setting that is not a boolean, but
+  // over the entry as shell.json has it now rather than as the last list load
+  // left it. Its buttons sit in the header, live before that load lands, and
+  // the popup's store does not watch the file, so a write from the expanded
+  // panel would otherwise leave this one comparing against a stale mode.
+  // The file can still trail the host by a write, so the host decides: the
+  // write always goes, and the host's "nothing changed" for an entry that
+  // exists means it already holds this mode.
+  function setOpenAs(mode) {
+    if (busy) return false
+    if (!shell || typeof shell.updateEntryInline !== "function" || selfId === "") {
+      setStatus("Could not save the setting: no shell connection", true)
+      return false
+    }
+    openAsConfig.reload()
+    var raw = Model.selfEntryFromShellConfig(openAsConfig.text(), selfId)
+    var current = raw === "" ? null : Model.parseSelfEntry(raw)
+    if (!current) {
+      setStatus("Could not read the setting from shell.json", true)
+      return false
+    }
+    var next = Model.withOpenAs(current, mode)
+    shell.updateEntryInline(selfId, next)
+    selfEntry = next
+    selfSettings = Model.parseSelfSettings(JSON.stringify(next))
+    return true
   }
 
   property string pendingKind: ""
@@ -1320,6 +1345,16 @@ Item {
   // reloading at once for a change the bar already handles is pure waste.
   property bool watchConfig: false
   onWatchConfigChanged: if (!watchConfig) configReload.stop()
+
+  // The blocking read setOpenAs makes, apart from the watcher below, which
+  // only the expanded panel turns on.
+  FileView {
+    id: openAsConfig
+    path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
+    preload: false
+    blockAllReads: true
+    printErrors: false
+  }
 
   FileView {
     id: shellConfig
