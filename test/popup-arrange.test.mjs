@@ -92,6 +92,14 @@ test("setOpenAs writes over shell.json as it is now, not the store's copy", () =
   same.state.shell.updateEntryInline = (id, entry) => { same.effects.push([id, entry]); return false }
   assert.equal(same.state.setOpenAs("window"), true)
   assert.equal(same.effects.length, 1)
+  // A refusal for a mode the file does not hold is a failed write, not
+  // "nothing changed": the form stays put and the store keeps its setting.
+  const refused = actionStore(null, file)
+  refused.state.selfSettings = { openAs: "window" }
+  refused.state.shell.updateEntryInline = (id, entry) => { refused.effects.push([id, entry]); return false }
+  assert.equal(refused.state.setOpenAs("overlay"), false)
+  assert.equal(refused.effects.length, 1)
+  assert.deepEqual(refused.state.selfSettings, { openAs: "window" })
   // Unreadable, or no entry: refuse rather than rewrite the entry from nothing.
   for (const text of ["", "{", JSON.stringify({ plugins: [] })]) {
     const broken = actionStore(null, text)

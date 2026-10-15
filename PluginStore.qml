@@ -187,9 +187,10 @@ Item {
   // left it. Its buttons sit in the header, live before that load lands, and
   // the popup's store does not watch the file, so a write from the expanded
   // panel would otherwise leave this one comparing against a stale mode.
-  // The file can still trail the host by a write, so the host decides: the
-  // write always goes, and the host's "nothing changed" for an entry that
-  // exists means it already holds this mode.
+  // The write always goes and the host decides. The host answers false both
+  // for "nothing changed" and for a write it refused, so a false counts as
+  // saved only when the file already holds this mode; otherwise the form
+  // stays as it is rather than show a mode that was never stored.
   function setOpenAs(mode) {
     if (busy) return false
     if (!shell || typeof shell.updateEntryInline !== "function" || selfId === "") {
@@ -204,7 +205,11 @@ Item {
       return false
     }
     var next = Model.withOpenAs(current, mode)
-    shell.updateEntryInline(selfId, next)
+    if (shell.updateEntryInline(selfId, next) !== true
+        && Model.openAs(Model.parseSelfSettings(raw)) !== mode) {
+      setStatus("Could not save the setting", true)
+      return false
+    }
     selfEntry = next
     selfSettings = Model.parseSelfSettings(JSON.stringify(next))
     return true
