@@ -1160,10 +1160,14 @@ class Updater:
         prepared = records["prepared"]
         keys = {"replacement"} if request["install"] else {"original", "replacement"}
         require(type(prepared) is dict and set(prepared) == keys, "Unknown prepared record")
+        # Stored device numbers are evidence, not assertions: btrfs and other
+        # filesystems may renumber st_dev across a remount or reboot (issue #7),
+        # so identity is the inode plus the backup's current co-location.
+        tx_dev = os.fstat(tx).st_dev
         for pair in prepared.values():
             require(type(pair) is list and len(pair) == 2
                     and all(type(value) is int for value in pair)
-                    and pair[0] == os.fstat(tx).st_dev and pair[1] > 0, "Invalid prepared identity")
+                    and pair[0] > 0 and pair[1] > 0, "Invalid prepared identity")
         if request["install"]:
             require(self.absent(tx, "checkout"), "Install still has a checkout")
             expected = {"status": "installed"}
@@ -1172,7 +1176,9 @@ class Updater:
             require(prepared["original"] != prepared["replacement"], "Contradictory identities")
             checkout = checked_dir(tx, "checkout")
             try:
-                require(list(identity(checkout)) == prepared["original"], "Backup identity changed")
+                current = identity(checkout)
+                require(current[0] == tx_dev and current[1] == prepared["original"][1],
+                        "Backup identity changed")
             finally:
                 os.close(checkout)
             expected = {"status": "updated", "backup": self.home

@@ -342,6 +342,35 @@ class CompletedDeletionTests(unittest.TestCase):
         self.assertEqual(roots, [self.active.stat().st_ino, self.archive.stat().st_ino])
         self.assert_sentinels()
 
+    def test_renumbered_devices_still_validate_by_inode(self):
+        # The kernel may renumber st_dev across a remount or reboot while the
+        # directories are the same ones (issue #7). Stored device numbers must
+        # not permanently disqualify proven-success history from archival or
+        # cleanup; identity is the inode plus current co-location.
+        for number, install in ((51, False), (52, True)):
+            tx = self.fixture(number, archived=False, install=install)
+            path = tx / "prepared.json"
+            doc = json.loads(path.read_text())
+            for pair in doc.values():
+                pair[0] += 1
+            path.write_text(json.dumps(doc))
+            result = self.remove(tx)
+            self.assertEqual(result, {"status": "removed", "transactionRemoved": True, "error": ""})
+            self.assertFalse(tx.exists())
+        self.assert_sentinels()
+
+    def test_zero_or_negative_prepared_identities_stay_refused(self):
+        for count, (dev, ino) in enumerate(((0, 5), (-1, 5), (5, 0))):
+            with self.subTest(dev=dev, ino=ino):
+                tx = self.fixture(60 + count)
+                path = tx / "prepared.json"
+                doc = json.loads(path.read_text())
+                for pair in doc.values():
+                    pair[0], pair[1] = dev, ino
+                path.write_text(json.dumps(doc))
+                self.unchanged(tx)
+        self.assert_sentinels()
+
     def unchanged(self, tx, action=None, budget=None):
         before = self.snapshot(tx)
         result = action() if action else self.remove(tx, budget)
