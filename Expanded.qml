@@ -1072,9 +1072,9 @@ Item {
           id: refreshButton
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
-          iconText: root.refreshing ? "" : "󰑓"
+          iconText: root.refreshing ? "" : "󰉹"
           fontSize: Style.font.display
-          tooltipText: root.browsing ? "Re-fetch the catalog" : "Re-read the plugin list"
+          tooltipText: root.browsing ? "Re-fetch the catalog" : "Refresh plugin list"
           foreground: root.foreground
           fontFamily: root.fontFamily
           enabled: !root.loading && !root.catalogLoading && !root.busy
@@ -1083,6 +1083,19 @@ Item {
             if (root.browsing) { store.loadCatalog(true); return }
             store.reload()
             store.checkUpdates()
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.rightMargin: Style.space(2)
+            anchors.bottomMargin: Style.space(2)
+            visible: !root.refreshing
+            text: "󰑐"
+            color: refreshButton.foreground
+            font.family: refreshButton.fontFamily
+            font.pixelSize: Math.round(refreshButton.fontSize * 0.55)
           }
 
           Text {

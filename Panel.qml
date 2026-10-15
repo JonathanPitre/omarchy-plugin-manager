@@ -1101,12 +1101,12 @@ Panel {
             // The button's own glyph steps aside while a refresh runs and the
             // spinner below takes its place: a turning arrow says "working"
             // where a greyed one only said "not now".
-            iconText: root.refreshing ? "" : "󰑓"
+            iconText: root.refreshing ? "" : "󰉹"
             // The one icon in the header, next to two text buttons: at the
             // default size it read as an afterthought beside them. Display
             // size puts it on the same scale as the title at the other end.
             fontSize: Style.font.display
-            tooltipText: root.browsing ? "Re-fetch the catalog" : "Re-read the plugin list"
+            tooltipText: root.browsing ? "Re-fetch the catalog" : "Refresh plugin list"
             foreground: root.contentForeground
             fontFamily: root.contentFontFamily
             enabled: !root.loading && !root.catalogLoading && !root.busy
@@ -1119,6 +1119,19 @@ Panel {
               if (root.browsing) { root.loadCatalog(true); return }
               root.reload()
               root.checkUpdates()
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              anchors.rightMargin: Style.space(2)
+              anchors.bottomMargin: Style.space(2)
+              visible: !root.refreshing
+              text: "󰑐"
+              color: refreshButton.foreground
+              font.family: refreshButton.fontFamily
+              font.pixelSize: Math.round(refreshButton.fontSize * 0.55)
             }
 
             Text {

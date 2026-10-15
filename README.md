@@ -857,7 +857,7 @@ url cannot become a command. Urls are also validated against `https://`,
 | `t` | Installed: cycle the Status dropdown |
 | `c` `a` | Browse: cycle the Category and Availability dropdowns |
 | `1` `2` | Switch to the Installed / Browse tab |
-| `r` | Re-read the plugin list or re-fetch the active Browse catalog |
+| `r` | Refresh the plugin list or re-fetch the active Browse catalog |
 | `Esc` | Clear the search, then leave the field, then close the panel |
 
 In the popup's Browse details, `Tab`, `Shift+Tab`, and the arrow keys move
