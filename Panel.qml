@@ -2246,9 +2246,20 @@ Panel {
                 visible: Model.updateDataNearLimit(store.updateDataStatus)
                 height: visible ? implicitHeight : 0
                 width: parent.width
-                text: store.autoCleanupCompleted
-                  ? "Nearly full: automatic cleanup will delete proven-success history when it runs. Refused and failed history is preserved."
-                  : "Nearly full: run Delete update data in Info below, or raise the limit."
+                text: "Nearly full: run Delete update data in Info below, or raise the limit."
+                color: root.contentForeground
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+
+              Text {
+                // Never rich text: AutoText would fetch what a crafted string points at.
+                textFormat: Text.PlainText
+                visible: Model.transactionLimitFallback(store.updateDataStatus, store.transactionLimit)
+                height: visible ? implicitHeight : 0
+                width: parent.width
+                text: "The helper is using " + store.updateDataStatus.limit + ": the saved value was unreadable, so the default applies."
                 color: root.contentForeground
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.caption
@@ -2268,7 +2279,7 @@ Panel {
                 text: "-"
                 tooltipText: "Keep fewer entries"
                 bordered: true
-                enabled: !root.busy
+                enabled: !root.busy && store.transactionLimit > store.transactionLimitFloor
                 opacity: enabled ? 1 : 0.4
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
@@ -2281,75 +2292,12 @@ Panel {
                 text: "+"
                 tooltipText: "Keep more entries"
                 bordered: true
-                enabled: !root.busy
+                enabled: !root.busy && store.transactionLimit < Model.TRANSACTION_LIMIT_MAX
                 opacity: enabled ? 1 : 0.4
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 fontSize: Style.font.caption
                 onClicked: store.adjustTransactionLimit(Model.TRANSACTION_LIMIT_STEP)
-              }
-            }
-          }
-
-          // Deleting proven successes by hand is the default; switching this
-          // on lets the store run the same deletion itself when history nears
-          // the limit. Anything needing review is never eligible either way.
-          Rectangle {
-            width: parent.width
-            height: Math.max(autoCleanupText.implicitHeight, autoCleanupSwitch.implicitHeight) + Style.space(12) * 2
-            radius: Style.cornerRadius
-            color: Style.normalFill
-            border.width: 1
-            border.color: Qt.alpha(root.secondaryForeground, 0.35)
-
-            Column {
-              id: autoCleanupText
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(12)
-              anchors.right: autoCleanupSwitch.left
-              anchors.rightMargin: Style.space(16)
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(4)
-
-              Text {
-                // Never rich text: AutoText would fetch what a crafted string points at.
-                textFormat: Text.PlainText
-                width: parent.width
-                text: "Automatically clean up completed update data"
-                color: root.contentForeground
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.body
-                wrapMode: Text.WordWrap
-              }
-
-              Text {
-                // Never rich text: AutoText would fetch what a crafted string points at.
-                textFormat: Text.PlainText
-                width: parent.width
-                text: "Off: completed journals and rollback backups are kept until Delete update data runs. "
-                  + "On: when history nears the limit, proven successes are deleted automatically. Refused, failed and unresolved histories are always preserved."
-                color: root.secondaryForeground
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-            }
-
-            ToggleSwitch {
-              id: autoCleanupSwitch
-              anchors.right: parent.right
-              anchors.rightMargin: Style.space(12)
-              anchors.verticalCenter: parent.verticalCenter
-              checked: store.autoCleanupCompleted
-              interactive: true
-              busy: root.busy
-              foreground: root.contentForeground
-              onToggled: store.setAutoCleanupCompleted(!store.autoCleanupCompleted)
-
-              PanelToolTip {
-                visible: autoCleanupSwitch.containsMouse
-                text: store.autoCleanupCompleted ? "Proven successes are deleted automatically near the limit" : "Completed update data is kept until deleted by hand"
-                fontFamily: root.contentFontFamily
               }
             }
           }

@@ -262,12 +262,23 @@ function transactionLimit(settings) {
     ? value : TRANSACTION_LIMIT_DEFAULT
 }
 
-// Opt-in automatic cleanup of proven-success history only. Off unless the key
-// is exactly the boolean true; refused, failed and unresolved histories are
-// never eligible, with or without this setting.
-function autoCleanupCompleted(settings) {
-  return !!settings && hasOwnKey(settings, "autoCleanupCompleted")
-    && settings.autoCleanupCompleted === true
+// Lowest settable capacity: never below the live active count, so lowering
+// the limit can never wedge updates behind history that cannot archive down.
+// Without a fresh status the static minimum applies.
+function transactionLimitFloor(status) {
+  if (!status || status.available !== true || typeof status.activeCount !== "number"
+      || !isFinite(status.activeCount)) return TRANSACTION_LIMIT_MIN
+  var count = Math.floor(status.activeCount)
+  if (count < TRANSACTION_LIMIT_MIN) count = TRANSACTION_LIMIT_MIN
+  if (count > TRANSACTION_LIMIT_MAX) count = TRANSACTION_LIMIT_MAX
+  return count
+}
+
+// True when the helper enforces a different limit than Settings saved: the
+// shell.json entry was missing, unreadable, or hostile, so the helper fell
+// back while Settings still shows the saved value.
+function transactionLimitFallback(status, configured) {
+  return !!status && status.available === true && status.limit !== configured
 }
 
 // This plugin's own entry, found in shell.json itself rather than in what the
@@ -2905,8 +2916,8 @@ function updateDataCountLabel(status, loading) {
 }
 
 // Warning threshold for Settings: within a few entries of the configured
-// capacity, or already past it. Drives the near-limit warning and the opt-in
-// automatic cleanup edge trigger; never a mutation by itself.
+// capacity, or already past it. Drives the near-limit warning; never a
+// mutation by itself.
 function updateDataNearLimit(status) {
   if (!status || status.available !== true) return false
   return status.lowerBound || status.activeCount >= status.limit - TRANSACTION_LIMIT_NEAR

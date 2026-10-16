@@ -154,14 +154,10 @@ Item {
   // which archival and refusal happen, never what counts as proven success.
   readonly property int transactionLimit: Model.transactionLimit(selfSettings)
 
-  // Opt-in automatic cleanup of proven-success history only. Refused, failed
-  // and unresolved histories stay for manual review either way.
-  readonly property bool autoCleanupCompleted: Model.autoCleanupCompleted(selfSettings)
-
-  // Edge trigger memory for the opt-in cleanup: set on every status arrival,
-  // so the automatic run fires once when history crosses into the near-limit
-  // margin, not on every refresh while it stays there.
-  property bool updateDataWasNearLimit: false
+  // Lowest settable capacity right now: the live active count, so lowering
+  // the limit can never wedge updates. Falls back to the static minimum
+  // until a fresh status arrives.
+  readonly property int transactionLimitFloor: Model.transactionLimitFloor(updateDataStatus)
 
   // Persist one setting through the host, merged over the entry as it was
   // loaded. The local copies move only when the host accepted the write; the
@@ -258,7 +254,7 @@ Item {
 
   function setTransactionLimit(value) {
     if (!writeSelfIntSetting("transactionLimit", value, transactionLimit,
-      Model.TRANSACTION_LIMIT_MIN, Model.TRANSACTION_LIMIT_MAX, Model.TRANSACTION_LIMIT_DEFAULT)) return false
+      transactionLimitFloor, Model.TRANSACTION_LIMIT_MAX, Model.TRANSACTION_LIMIT_DEFAULT)) return false
     // The count caption comes from the last status read under the old limit.
     // Re-read so Settings shows the new threshold against a fresh count.
     refreshUpdateData()
@@ -267,10 +263,6 @@ Item {
 
   function adjustTransactionLimit(step) {
     return setTransactionLimit(transactionLimit + step)
-  }
-
-  function setAutoCleanupCompleted(value) {
-    return writeSelfSetting("autoCleanupCompleted", value, autoCleanupCompleted)
   }
 
   property string pendingKind: ""
@@ -1454,15 +1446,8 @@ Item {
     } else if (!proc.cleanup && updateDataProcess === proc) {
       updateDataProcess = null
       if (proc.requestGeneration === updateDataGeneration) {
-        var wasNear = updateDataWasNearLimit
         updateDataStatus = Model.parseUpdateDataStatus(proc.output, code)
         updateDataLoading = false
-        updateDataWasNearLimit = Model.updateDataNearLimit(updateDataStatus)
-        // Opt-in automatic cleanup, edge-triggered: the setting is the
-        // authorization, so no confirmation dialog opens. One run as history
-        // crosses into the near-limit margin; staying there never retriggers.
-        if (!wasNear && updateDataWasNearLimit && autoCleanupCompleted)
-          startCleanupUpdateData()
       }
     }
     proc.destroy()

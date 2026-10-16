@@ -106,15 +106,12 @@ data. The button waits for an available status and for local actions to settle.
 8 to 128 in steps of 8. It only moves the capacity threshold at which proven
 successes archive and new transactions refuse; it never weakens what counts as
 proven success. The helper reads the same `shell.json` entry Settings writes,
-so both agree without a new command shape.
+so both agree without a new command shape. Settings never lets the limit drop
+below the live active count, so lowering it cannot wedge updates. If the helper
+cannot read the saved value, it enforces the default and Settings names the
+limit actually in force.
 
-**Automatically clean up completed update data** is **off by default**. Switched
-on, the store runs the same proven-success-only deletion itself once when
-history crosses into the near-limit margin (within 4 entries of the limit, or
-past it). Refused, failed and unresolved histories are never eligible, with or
-without the setting. The outcome line is the same one a manual run reports.
-
-Opening Settings only reads status, unless automatic cleanup is switched on.
+Opening Settings only reads status; it never starts cleanup automatically.
 After each cleanup attempt, Settings keeps a bounded outcome message with this
 pass's removed/preserved sample counts and separately refreshes the active count.
 These counts are not the total retained history and do not claim both roots are
@@ -292,9 +289,8 @@ Both settings are stored in this plugin's own entry in
 `~/.config/omarchy/shell.json`, as `allowUnverifiedUpdates: true` and
 `allowUnverifiedInstalls: true`, written
 through the host and merged over whatever else that entry holds. The history
-limit and automatic cleanup live in the same entry as `transactionLimit`
-(a bounded integer, removed when it equals the default 32) and
-`autoCleanupCompleted: true`. A switch
+limit lives in the same entry as `transactionLimit`
+(a bounded integer, removed when it equals the default 32). A switch
 refuses to write until the plugin list has loaded and that entry was read
 whole, so a failed read can never rewrite the entry from an empty copy. With
 the setting off, a checkout whose only difference is an unreviewed upstream
@@ -490,8 +486,9 @@ most 8 KiB), with `schemaVersion: 1`, canonical `paths.plugins`, `paths.active`
 and `paths.archive` derived from the account's passwd home, not `HOME` or XDG
 variables. Unsafe or oversized home metadata is refused, with `paths: null`.
 
-`available: true` includes `activeCount`, the configured `limit` (default 32,
-settable from 8 to 128 in Settings), and `lowerBound`: false for counts up to
+`available: true` includes `activeCount`, the effective `limit` (default 32,
+settable from 8 to 128 in Settings; the helper falls back to the default when
+the saved value is unreadable, and Settings then names the limit in force), and `lowerBound`: false for counts up to
 the limit, true for limit + 1 (meaning **at least** that many). Every direct active entry
 counts, including unknown files and symlinks; contents and archives are never
 inspected. Missing active data or its configuration parents means zero; an
