@@ -5096,6 +5096,15 @@ test("the popup subtitle sits on its own full-width row under the title", () => 
   assert.doesNotMatch(panel, /"  ·  "/)
 })
 
+test("the expanded summary elides before the tab cluster instead of running under it", () => {
+  const expanded = readFileSync(new URL("../Expanded.qml", import.meta.url), "utf8")
+  const summaryStart = expanded.indexOf('return summary + "  ·  " + root.behindCount + " to update"')
+  const blockStart = expanded.lastIndexOf("Text {", summaryStart)
+  const block = expanded.slice(blockStart, summaryStart + 100)
+  assert.match(block, /anchors\.right: root\.browsing \? marketplaceLink\.left : tabs\.left/)
+  assert.match(block, /elide: Text\.ElideRight/)
+})
+
 test("the manifest registers the expanded window as a panel kind", () => {
   const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"))
   assert.deepEqual(manifest.kinds, ["bar-widget", "panel"])

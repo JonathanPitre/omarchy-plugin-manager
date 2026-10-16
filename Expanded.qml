@@ -927,7 +927,10 @@ Item {
           textFormat: Text.PlainText
           anchors.left: title.right
           anchors.leftMargin: Style.space(10)
+          anchors.right: root.browsing ? marketplaceLink.left : tabs.left
+          anchors.rightMargin: Style.space(10)
           anchors.baseline: title.baseline
+          elide: Text.ElideRight
           text: {
             if (root.browsing) {
               if (root.catalogLoading && root.catalog.length === 0) return "fetching catalog…"
