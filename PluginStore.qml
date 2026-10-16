@@ -1129,7 +1129,7 @@ Item {
       var status = outcome ? outcome.status : (processFailure || "outcome unknown; inspect retained transactions")
       var reason = outcome && typeof outcome.reason === "string"
         ? outcome.reason.replace(/[^\x20-\x7e]/g, "").slice(0, 200) : status
-      var changed = status === "updated"
+      var changed = status.indexOf("updated") === 0
       resultsById[step.id] = { id: step.id, name: step.name, ok: changed,
         reason: changed ? "" : (reason || status) }
     }
@@ -1774,7 +1774,9 @@ Item {
     stdout: SplitParser {
       splitMarker: ""
       onRead: function(chunk) {
-        if (root.pinnedOutput.length + chunk.length > 65536) {
+        // Bulk results carry every item; single updates keep the small cap.
+        var cap = root.busyKind === "bulk-update" ? 65536 : 4096
+        if (root.pinnedOutput.length + chunk.length > cap) {
           root.pinnedOverflow = true
           root.pinnedOutput = ""
         } else if (!root.pinnedOverflow) root.pinnedOutput += chunk

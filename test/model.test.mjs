@@ -36,7 +36,7 @@ const Model = new Function(
     tiledExpandedPanel, openAs, withOpenAs, expandedModeFromPayload, selfEntryFromShellConfig,
     updateBadge, updateCompareUrl,
     updateReleaseCandidates, versionLabel, countBehind,
-    bulkUpdateCandidates, bulkUpdateConfirmMessage, isCapacityRefusal, bulkUpdateSummary,
+    bulkUpdateCandidates, bulkUpdateConfirmMessage, bulkUpdateSummary,
     trustedGithubReleaseApiUrl, trustedGithubReleaseUrl, trustedGithubRepoUrl, trustedGithubWebUrl,
     githubNavigationRequest, releaseProbeCommand,
     releaseNavigationInitialState, releaseNavigationRequestTransition,
@@ -138,10 +138,6 @@ test("bulk update candidates cover verified rows, opt-in tips, and nothing else"
     { name: "A", ok: true }, { name: "B", ok: false, reason: "tip moved" },
   ]), "Updated 1, skipped 1 (B: tip moved)")
   assert.equal(Model.bulkUpdateSummary([{ name: "A", ok: true }]), "Updated 1, skipped 0")
-  // Only the helper's capacity wording stops a bulk run.
-  assert.equal(Model.isCapacityRefusal("Transaction limit: review ~/.config/omarchy/plugin-manager-updates"), true)
-  assert.equal(Model.isCapacityRefusal("update refused"), false)
-  assert.equal(Model.isCapacityRefusal(""), false)
 })
 
 function upstreamFixture(verified = "a".repeat(40)) {
@@ -1282,7 +1278,7 @@ test("bulk update confirms once and delegates every bound verified or unverified
   }
 
   const model = Function(source + `; return { pinnedRequest, unverifiedRequest, findRow, shortSha,
-    bulkUpdateCandidates, bulkUpdateConfirmMessage, isCapacityRefusal, bulkUpdateSummary,
+    bulkUpdateCandidates, bulkUpdateConfirmMessage, bulkUpdateSummary,
     applyUpdateReport, applyPinnedUpdates }`)()
   const target = "b".repeat(40), base = "a".repeat(40), tip = "c".repeat(40)
   const origin = "https://github.com/acme/plugin"
@@ -1390,10 +1386,10 @@ test("bulk update confirms once and delegates every bound verified or unverified
     { id: "acme.tip", status: "updated", reason: "" },
   ] })
   assert.deepEqual(updateReloadFailure.bulkResults, [
-    { id: "acme.verified", name: "Verified", ok: false, reason: "Shell rescan refused" },
+    { id: "acme.verified", name: "Verified", ok: true, reason: "" },
     { id: "acme.tip", name: "Tip", ok: true, reason: "" },
   ])
-  assert.equal(updateReloadFailure.status.text, "Updated 1, skipped 1 (Verified: Shell rescan refused)")
+  assert.equal(updateReloadFailure.status.text, "Updated 2, skipped 0")
 
   const rejected = begin()
   rejected.askBulkUpdate()

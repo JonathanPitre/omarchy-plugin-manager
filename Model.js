@@ -2739,13 +2739,6 @@ function bulkUpdateConfirmMessage(candidates) {
     + "Unreviewed commits install exactly as listed, nothing newer."
 }
 
-// The helper refuses publication past its retained-transaction capacity with
-// this reason (see CAPACITY_REASON in helpers/pinned_update.py). A bulk run
-// stops on it instead of retrying.
-function isCapacityRefusal(text) {
-  return /transaction limit/i.test(String(text || ""))
-}
-
 // "Updated x, skipped y (name: reason; …)". Names and reasons are already
 // plain text when the store builds them.
 function bulkUpdateSummary(results) {
