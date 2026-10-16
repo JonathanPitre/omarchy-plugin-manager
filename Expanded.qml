@@ -1336,7 +1336,8 @@ Item {
           if (root.barMovePending) return root.arrangeOpen || root.statusSource !== "layout" ? root.status : ""
           if (root.arrangeOpen) return root.barSnapshot ? root.status
             : "Bar layout unavailable; waiting for host configuration."
-          if (root.busy) return Model.actionGerund(root.busyKind) + " " + root.busyId + "…"
+          if (root.busy) return root.busyKind === "bulk-update" ? root.status
+            : Model.actionGerund(root.busyKind) + " " + root.busyId + "…"
           if (root.browsing && root.catalogError !== "") return root.catalogError
           if (!root.browsing && root.loadError !== "") return root.loadError
           return root.statusSource === "layout" ? "" : root.status

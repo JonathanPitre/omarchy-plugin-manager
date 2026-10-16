@@ -654,6 +654,10 @@ Never resolve a collision by overwriting an archived transaction.
 
 Once clicked, the finite worker runs independently of the QML observer. Closing
 the window is **not cancellation**, including during a manager self-update.
+For a bulk update, a worker stop signal finishes the current preparation and
+skips unstarted items. Already checked updates still apply after final safety
+checks, followed by a shell rescan and the recorded summary. There is no bulk
+Stop control in the panel.
 The already-loaded Python worker retains no dependency on reopening its helper
 source after publication. Its bounded notification and transaction records
 outlive the window. A rescan failure reports **updated; reload failed** or

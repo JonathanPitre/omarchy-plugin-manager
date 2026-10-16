@@ -1529,7 +1529,8 @@ Panel {
           text: {
             if (root.settingsOpen) return root.statusSource === "layout" ? "" : root.status
             if (root.barMovePending) return root.popupMoveOwner.status + root.placementNotice
-            if (root.busy) return Model.actionGerund(root.busyKind) + " " + root.busyId + "…"
+            if (root.busy) return root.busyKind === "bulk-update" ? root.status
+              : Model.actionGerund(root.busyKind) + " " + root.busyId + "…"
             if (root.browsing && root.catalogError !== "") return root.catalogError
             if (!root.browsing && root.loadError !== "") return root.loadError
             return root.status

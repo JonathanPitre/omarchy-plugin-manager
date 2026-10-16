@@ -963,6 +963,7 @@ Item {
   property string lastBulkSummaryNonce: ""
   property string summaryOutput: ""
   property bool summaryOverflow: false
+  property bool summaryDrainOnly: false
   readonly property int bulkUpdatableCount: Model.bulkUpdateCandidates(rows).length
 
   // The request a row's Update would send: the verified snapshot when one is
@@ -1078,7 +1079,7 @@ Item {
     pinnedOutput = ""
     pinnedExited = false
     pinnedOverflow = false
-    setStatus("Updating " + requests.length + " plugins; closing this window does not cancel it", false)
+    setStatus("Updating " + requests.length + " plugins; stopping finishes the current preparation and checked updates still apply; closing this window does not cancel it", false)
     pinnedProc.command = ["/usr/bin/env", "-i", "--", "PATH=/usr/bin:/bin",
       "WAYLAND_DISPLAY=" + String(Quickshell.env("WAYLAND_DISPLAY") || ""),
       "/usr/bin/python3", "-I", "-S", pinnedHelperPath,
@@ -1114,13 +1115,17 @@ Item {
     var resultsById = Object.create(null)
     var stepsById = Object.create(null)
     var processFailure = ""
+    var nonce = ""
     for (var i = 0; i < bulkQueue.length; i++) stepsById[bulkQueue[i].id] = bulkQueue[i]
     for (var j = 0; j < bulkResults.length; j++) resultsById[bulkResults[j].id] = bulkResults[j]
     try {
       var result = JSON.parse(pinnedOutput)
       if (!pinnedOverflow && result && result.status === "bulk complete" && Array.isArray(result.updates)) {
         bulkRescanFailed = result.rescan === "failed"
-        if (typeof result.nonce === "string") lastBulkSummaryNonce = result.nonce
+        if (typeof result.nonce === "string") {
+          nonce = result.nonce
+          lastBulkSummaryNonce = nonce
+        }
         for (var j = 0; j < result.updates.length; j++) {
           var update = result.updates[j]
           if (update && typeof update.id === "string" && typeof update.status === "string")
@@ -1148,23 +1153,27 @@ Item {
       if (resultsById[bulkQueue[n].id]) bulkResults.push(resultsById[bulkQueue[n].id])
     pinnedOutput = ""
     finishBulk()
+    return nonce
   }
 
   // A batch can outlive this store: the shell reloads every plugin when the
   // first exchange lands, destroying the batch state with it. The worker
   // records the summary on disk; a freshly loaded store picks it up here.
-  function consumeBulkSummary() {
+  function consumeBulkSummary(nonce) {
     if (summaryProc.running) return
     summaryOutput = ""
     summaryOverflow = false
+    summaryDrainOnly = typeof nonce === "string" && nonce !== ""
     summaryProc.command = ["/usr/bin/env", "-i", "--", "PATH=/usr/bin:/bin",
-      "/usr/bin/python3", "-I", "-S", pinnedHelperPath, "--consume-bulk-summary"]
+      "/usr/bin/python3", "-I", "-S", pinnedHelperPath].concat(summaryDrainOnly
+        ? ["--drain-bulk-summary", nonce] : ["--consume-bulk-summary"])
     summaryProc.running = true
   }
 
   function finishBulkSummary() {
     var raw = summaryOverflow ? "" : summaryOutput
     summaryOutput = ""
+    if (summaryDrainOnly) return
     var payload = null
     try { payload = JSON.parse(raw) } catch (error) {}
     if (!payload || payload.status !== "bulk complete" || !Array.isArray(payload.updates)
@@ -1216,7 +1225,8 @@ Item {
   function finishPinnedUpdate() {
     if (!pinnedExited) return
     if (busyKind === "bulk-update") {
-      finishBulkProcess()
+      var nonce = finishBulkProcess()
+      if (nonce !== "") consumeBulkSummary(nonce)
       return
     }
     if (busyKind !== "update" && busyKind !== "install") return
