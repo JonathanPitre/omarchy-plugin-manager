@@ -398,6 +398,10 @@ Item {
     rows = Model.applyPinnedUpdates(merged, catalog, allowUnverifiedUpdates)
     rowsLoaded()
     finishOpenLoad()
+    // A batch may have finished while no store was alive to hear it; a fresh
+    // load picks up its recorded summary. Skipped while busy so a summary
+    // never retires an action still running.
+    if (!busy && !bulkActive) consumeBulkSummary()
   }
 
   // ---- Update checks ------------------------------------------------------
@@ -954,6 +958,11 @@ Item {
   property var bulkResults: []
   property var bulkPendingRequests: []
   property bool bulkActive: false
+  // The last reported bulk batch: a reloaded store skips a summary it
+  // already showed instead of announcing it twice.
+  property string lastBulkSummaryNonce: ""
+  property string summaryOutput: ""
+  property bool summaryOverflow: false
   readonly property int bulkUpdatableCount: Model.bulkUpdateCandidates(rows).length
 
   // The request a row's Update would send: the verified snapshot when one is
@@ -1111,6 +1120,7 @@ Item {
       var result = JSON.parse(pinnedOutput)
       if (!pinnedOverflow && result && result.status === "bulk complete" && Array.isArray(result.updates)) {
         bulkRescanFailed = result.rescan === "failed"
+        if (typeof result.nonce === "string") lastBulkSummaryNonce = result.nonce
         for (var j = 0; j < result.updates.length; j++) {
           var update = result.updates[j]
           if (update && typeof update.id === "string" && typeof update.status === "string")
@@ -1138,6 +1148,43 @@ Item {
       if (resultsById[bulkQueue[n].id]) bulkResults.push(resultsById[bulkQueue[n].id])
     pinnedOutput = ""
     finishBulk()
+  }
+
+  // A batch can outlive this store: the shell reloads every plugin when the
+  // first exchange lands, destroying the batch state with it. The worker
+  // records the summary on disk; a freshly loaded store picks it up here.
+  function consumeBulkSummary() {
+    if (summaryProc.running) return
+    summaryOutput = ""
+    summaryOverflow = false
+    summaryProc.command = ["/usr/bin/env", "-i", "--", "PATH=/usr/bin:/bin",
+      "/usr/bin/python3", "-I", "-S", pinnedHelperPath, "--consume-bulk-summary"]
+    summaryProc.running = true
+  }
+
+  function finishBulkSummary() {
+    var raw = summaryOverflow ? "" : summaryOutput
+    summaryOutput = ""
+    var payload = null
+    try { payload = JSON.parse(raw) } catch (error) {}
+    if (!payload || payload.status !== "bulk complete" || !Array.isArray(payload.updates)
+        || rows.length === 0 || busy || bulkActive) return
+    if (typeof payload.nonce === "string" && payload.nonce !== ""
+        && payload.nonce === lastBulkSummaryNonce) return
+    bulkQueue = []
+    bulkPendingRequests = []
+    for (var i = 0; i < payload.updates.length; i++) {
+      var update = payload.updates[i]
+      if (!update || typeof update.id !== "string") continue
+      var row = Model.findRow(rows, update.id)
+      if (!row) continue
+      bulkQueue.push({ id: row.id, name: row.name })
+      bulkPendingRequests.push({ id: row.id })
+    }
+    if (bulkQueue.length === 0) return
+    pinnedOutput = raw
+    pinnedOverflow = false
+    finishBulkProcess()
   }
 
   readonly property string pinnedHelperPath:
@@ -1787,6 +1834,25 @@ Item {
       root.pinnedExited = true
       // Drain final raw chunks before interpreting the one bounded result.
       Qt.callLater(root.finishPinnedUpdate)
+    }
+  }
+
+  Process {
+    id: summaryProc
+    clearEnvironment: true
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (root.summaryOutput.length + chunk.length > 65536) {
+          root.summaryOverflow = true
+          root.summaryOutput = ""
+        } else if (!root.summaryOverflow) root.summaryOutput += chunk
+      }
+    }
+    stderr: SplitParser { splitMarker: ""; onRead: function(chunk) {} }
+    onExited: function(exitCode) {
+      // Drain final raw chunks before interpreting the one bounded result.
+      Qt.callLater(root.finishBulkSummary)
     }
   }
 

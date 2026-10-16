@@ -269,7 +269,8 @@ test("catalog, installed load and branch report converge in all arrival orders",
   for (const order of ["CLR", "CRL", "LCR", "LRC", "RCL", "RLC"]) {
     const state = { rows: [], catalog: [], loading: false, loadError: "", loadRetried: false,
       pendingUpdateReport: "", checkingUpdates: false, rowsLoaded() {}, finishOpenLoad() {},
-      selfSettings: {}, allowUnverifiedUpdates: true }
+      selfSettings: {}, allowUnverifiedUpdates: true, busy: false, bulkActive: false,
+      consumeBulkSummary() { this.consumed = true } }
     const api = Function("Model", "state", `with (state) {
       ${qmlFunction(store, "applyLoad")}; ${qmlFunction(store, "applyUpdateReport")};
       return { applyLoad, applyUpdateReport }
@@ -283,6 +284,7 @@ test("catalog, installed load and branch report converge in all arrival orders",
       }
     }
     const projected = state.rows[0]
+    assert.equal(state.consumed, true, `a fresh load looks for a recorded summary: ${order}`)
     assert.equal(projected.remoteSha, tip, order)
     assert.equal(projected.verifiedTargetSha, head, order)
     assert.equal(projected.pinnedEligible, false, order)
@@ -1418,6 +1420,46 @@ test("bulk update confirms once and delegates every bound verified or unverified
   assert.equal(limited.status.text,
     "Updated 0, skipped 2 (Verified: Transaction limit: review x; Tip: Stopped: transaction limit)")
   assert.equal(limited.detached.length, 0, "a run with no successful changes does not rescan the shell")
+})
+
+test("a reloaded store reports a recorded bulk summary once, then never again", () => {
+  const store = readFileSync(new URL("../PluginStore.qml", import.meta.url), "utf8")
+  assert.match(store, /id: summaryProc/)
+  assert.match(store, /pinnedHelperPath, "--consume-bulk-summary"\]/)
+  assert.match(store, /if \(!busy && !bulkActive\) consumeBulkSummary\(\)/)
+  const target = "b".repeat(40), base = "a".repeat(40)
+  const model = Function(source + "; return { findRow, bulkUpdateSummary, applyUpdateReport, applyPinnedUpdates, parseUpdateReport }")()
+  const state = { rows: [{ id: "acme.plugin", name: "Plugin" }], busy: false, bulkActive: false,
+    bulkQueue: [], bulkPendingRequests: [], bulkResults: [], pinnedOutput: "", pinnedOverflow: false,
+    bulkRescanFailed: false, lastBulkSummaryNonce: "", summaryOutput: "", summaryOverflow: false,
+    pendingUpdateReport: "", allowUnverifiedUpdates: false, catalog: [],
+    setStatus(text, isError) { this.status = { text, isError: isError === true } },
+    requestFreshUpdateCycle() { this.freshCycle = true }, refreshUpdateData() { this.updateRefresh = true },
+    actionFinished(kind, label, code) { (this.finished = this.finished || []).push([kind, label, code]) },
+    applyUpdateReport: (rows) => rows, applyPinnedUpdates: (rows) => rows }
+  state.root = state
+  Object.assign(state, Function("Model", "state", `with (state) {
+    ${qmlFunction(store, "finishBulkSummary")};
+    ${qmlFunction(store, "finishBulkProcess")};
+    ${qmlFunction(store, "finishBulk")}; return {finishBulkSummary, finishBulkProcess, finishBulk}
+  }`)(model, state))
+  const payload = JSON.stringify({ status: "bulk complete", nonce: "7-9",
+    updates: [{ id: "acme.plugin", status: "updated", reason: "" }], rescan: "complete" })
+  state.summaryOutput = payload
+  state.finishBulkSummary()
+  assert.equal(state.status.text, "Updated 1, skipped 0")
+  assert.equal(state.freshCycle, true)
+  assert.equal(state.lastBulkSummaryNonce, "7-9")
+  state.status = null
+  state.freshCycle = false
+  state.summaryOutput = payload
+  state.finishBulkSummary()
+  assert.equal(state.status, null, "the same batch is not announced twice")
+  assert.equal(state.freshCycle, false)
+  state.summaryOutput = payload
+  state.busy = true
+  state.finishBulkSummary()
+  assert.equal(state.status, null, "a summary never retires an action still running")
 })
 
 test("the u key asks for a bulk update on the Installed tab of both surfaces", () => {
