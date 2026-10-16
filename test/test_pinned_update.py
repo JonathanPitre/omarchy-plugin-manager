@@ -227,6 +227,22 @@ class TransactionTests(unittest.TestCase):
         result = u.cleanup_completed(self.updater())
         self.assertEqual(result["status"], "complete")
 
+    def test_bulk_summary_is_consumed_once_then_gone(self):
+        home = str(self.home)
+        self.assertEqual(u.consume_bulk_summary(home), {})
+        result = {"status": "bulk complete", "updates": [{"id": "acme.plugin", "status": "updated", "reason": ""}],
+                  "rescan": "complete", "nonce": "1-2"}
+        u.write_bulk_summary(home, result)
+        path = self.home / ".config/omarchy/plugin-manager-bulk-summary.json"
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode) & 0o077, 0)
+        self.assertEqual(u.consume_bulk_summary(home),
+                         {"schemaVersion": 1, "nonce": "1-2", "status": "bulk complete",
+                          "updates": result["updates"], "rescan": "complete"})
+        self.assertEqual(u.consume_bulk_summary(home), {})
+        path.write_text("{oops")
+        self.assertEqual(u.consume_bulk_summary(home), {})
+        self.assertFalse(path.exists())
+
     def test_detached_bulk_executor_finishes_bound_updates_after_publication_reload(self):
         requests = [
             dict(schemaVersion=1, id="acme.plugin", repository=REPO,
@@ -245,11 +261,17 @@ class TransactionTests(unittest.TestCase):
                 self.deadline = time.monotonic() + 100
                 self.cancelled = False
 
-            def execute(self, request):
+            def prepare_update(self, request):
                 calls.append((request["id"], request["deferReload"]))
                 if request["id"] in ("acme.third", "acme.fourth"):
                     raise u.Refused("Target moved")
+                return request
+
+            def publish_update(self, request):
                 return {"status": "updated"}
+
+            def close(self):
+                pass
 
             def notify(self, request, result):
                 if request["id"] in ("acme.plugin", NEW_ID):
@@ -283,7 +305,10 @@ class TransactionTests(unittest.TestCase):
                 self.deadline = time.monotonic() + 100
                 self.cancelled = False
 
-            def execute(self, request):
+            def prepare_update(self, request):
+                return request
+
+            def publish_update(self, request):
                 return {"status": "updated"}
 
             def notify(self, request, result):
@@ -293,6 +318,9 @@ class TransactionTests(unittest.TestCase):
                 calls.append(self.deadline > time.monotonic())
                 if len(calls) <= failures[0]:
                     raise u.Refused("Shell is still starting")
+
+            def close(self):
+                pass
 
         result = u.execute_bulk_updates([u.request_value(self.request)], FixtureUpdater)
         self.assertEqual(calls, [True, True])
@@ -313,11 +341,17 @@ class TransactionTests(unittest.TestCase):
         calls = []
 
         class FixtureUpdater:
-            def execute(self, request):
+            def prepare_update(self, request):
                 calls.append(request["id"])
+                return request
+
+            def publish_update(self, request):
                 return {"status": "updated"}
 
             def notify(self, request, result):
+                pass
+
+            def close(self):
                 pass
 
         result = u.execute_bulk_updates(updates, FixtureUpdater, stop={"cancelled": True})
@@ -329,10 +363,10 @@ class TransactionTests(unittest.TestCase):
         stop = {"cancelled": False}
 
         class FlippingUpdater(FixtureUpdater):
-            def execute(self, request):
+            def prepare_update(self, request):
                 calls.append(request["id"])
                 stop["cancelled"] = True
-                return {"status": "updated"}
+                return request
 
             def reload(self):
                 pass
@@ -352,12 +386,22 @@ class TransactionTests(unittest.TestCase):
         calls = []
         reasons = {}
 
+        fail_prepare = [True]
+
         class FixtureUpdater:
-            def execute(self, request):
+            def prepare_update(self, request):
                 calls.append(request["id"])
+                if fail_prepare[0]:
+                    raise u.Refused(reasons[request["id"]])
+                return request
+
+            def publish_update(self, request):
                 return {"status": "unchanged; update refused", "reason": reasons[request["id"]]}
 
             def notify(self, request, result):
+                pass
+
+            def close(self):
                 pass
 
         reasons.update({updates[0]["id"]: u.CAPACITY_REASON, updates[1]["id"]: "Target moved"})
@@ -368,12 +412,54 @@ class TransactionTests(unittest.TestCase):
                           (updates[1]["id"], "unchanged; update refused", "Stopped: transaction limit")])
 
         calls.clear()
+        fail_prepare[0] = False
         reasons.update({updates[0]["id"]: "Transaction limit: review x", updates[1]["id"]: "Target moved"})
         result = u.execute_bulk_updates(updates, FixtureUpdater)
         self.assertEqual(calls, [updates[0]["id"], updates[1]["id"]],
                                 "a near-miss reason must not stop the batch")
         self.assertNotIn("Stopped: transaction limit",
                          [item["reason"] for item in result["updates"]])
+
+    def test_bulk_executor_vets_every_item_before_any_exchange(self):
+        updates = u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [
+            self.request,
+            dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                 unverifiedCommit=self.new_tip, expectedLocalHead=self.new_base),
+            dict(schemaVersion=1, id="acme.third", repository=REPO,
+                 verifiedCommit=self.target, expectedLocalHead=self.base),
+        ]})["bulkUpdates"]
+        calls = []
+
+        class FixtureUpdater:
+            def prepare_update(self, request):
+                calls.append(("vet", request["id"]))
+                if request["id"] == "acme.third":
+                    raise u.Refused("Target moved")
+                return request
+
+            def publish_update(self, request):
+                calls.append(("exchange", request["id"]))
+                return {"status": "updated"}
+
+            def notify(self, request, result):
+                pass
+
+            def close(self):
+                pass
+
+        result = u.execute_bulk_updates(updates, FixtureUpdater)
+        vets = [call for call in calls if call[0] == "vet"]
+        exchanges = [call for call in calls if call[0] == "exchange"]
+        self.assertEqual([call[1] for call in vets],
+                         [updates[0]["id"], updates[1]["id"], updates[2]["id"]])
+        self.assertEqual([call[1] for call in exchanges],
+                         [updates[0]["id"], updates[1]["id"]])
+        self.assertLess(max(calls.index(call) for call in vets),
+                        min(calls.index(call) for call in exchanges))
+        self.assertEqual([(item["id"], item["status"]) for item in result["updates"]],
+                         [(updates[0]["id"], "updated"),
+                          (updates[1]["id"], "updated"),
+                          (updates[2]["id"], "unchanged; update refused")])
 
     def test_bulk_request_binds_unique_updates_and_rejects_installs(self):
         requests = u.bulk_request_value({"schemaVersion": 1,

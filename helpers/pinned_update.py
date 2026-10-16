@@ -97,6 +97,8 @@ ARCHIVE_NAME = "plugin-manager-updates-archive"
 MAX_UPDATE_STATUS = 8192
 MAX_BULK_REQUEST = 32768
 MAX_BULK_RESULT = 65536
+BULK_SUMMARY_NAME = "plugin-manager-bulk-summary.json"
+MAX_BULK_SUMMARY = 65536
 UPDATE_RESULT_TIMEOUT = 140
 BULK_RESCAN_ATTEMPTS = 3
 BULK_RESCAN_TIMEOUT = 10
@@ -1635,20 +1637,19 @@ class Updater:
         create_file(self.tx, "result.json", json.dumps(result).encode())
         return result
 
-    def execute(self, value):
-        # Normalized bulk items re-enter here carrying the flag the bulk
-        # queue set after validation; strip it for validation, then restore
-        # it. Raw panel input never carries it (request_value refuses it).
-        deferred = value.get("deferReload", False)
-        require(type(deferred) is bool, "Invalid reload setting")
-        if "deferReload" in value:
-            value = {k: v for k, v in value.items() if k != "deferReload"}
-        request = request_value(value)
-        if deferred:
-            request["deferReload"] = True
+    def close(self):
+        for fd in reversed(self.fds):
+            os.close(fd)
+        self.fds.clear()
+
+    def prepare_update(self, request):
+        """Vet a normalized update request up to the exchange.
+
+        Files stay open: the caller publishes next, or closes on refusal.
+        Installs never arrive here; execute routes them straight on.
+        """
+        require(not request.get("install"), "Bulk updates cannot install plugins")
         try:
-            if request["install"]:
-                return self.install(request)
             self.open_paths(request["id"])
             self.local_metadata(request)
             if request["verified"]:
@@ -1666,8 +1667,22 @@ class Updater:
             self.check_clean(stage, base_tree, request, "index-final")
             self.check_anchors()
             create_file(self.tx, "prepared.json", json.dumps({"original": identity(self.original),
-                        "replacement": identity(stage)}).encode())
+                            "replacement": identity(stage)}).encode())
             self.checkpoint("before-exchange")
+        except Exception as error:
+            self.reason = reason_text(error)
+            if self.tx is not None:
+                # Best effort: the journal must never mask the refusal itself.
+                try:
+                    create_file(self.tx, "refused.json", json.dumps({"reason": self.reason}).encode())
+                except Exception:
+                    pass
+            raise
+        return request
+
+    def publish_update(self, request):
+        """Exchange a vetted request and report; the caller closes files."""
+        try:
             # Signals only set a flag, so none can raise between the syscall and
             # published=True. No automatic rollback can overwrite a later edit.
             self.exchange(request["id"])
@@ -1698,49 +1713,116 @@ class Updater:
                 except Exception:
                     pass
             raise
+
+    def execute(self, value):
+        # Normalized bulk items re-enter here carrying the flag the bulk
+        # queue set after validation; strip it for validation, then restore
+        # it. Raw panel input never carries it (request_value refuses it).
+        deferred = value.get("deferReload", False)
+        require(type(deferred) is bool, "Invalid reload setting")
+        if "deferReload" in value:
+            value = {k: v for k, v in value.items() if k != "deferReload"}
+        request = request_value(value)
+        if deferred:
+            request["deferReload"] = True
+        if request["install"]:
+            try:
+                return self.install(request)
+            except Exception as error:
+                if self.published:
+                    return {"status": "installed; finalization failed"}
+                self.reason = reason_text(error)
+                if self.tx is not None:
+                    # Best effort: the journal must never mask the refusal itself.
+                    try:
+                        create_file(self.tx, "refused.json", json.dumps({"reason": self.reason}).encode())
+                    except Exception:
+                        pass
+                raise
+            finally:
+                self.close()
+        try:
+            request = self.prepare_update(request)
+        except Exception:
+            self.close()
+            raise
+        try:
+            return self.publish_update(request)
         finally:
-            for fd in reversed(self.fds):
-                os.close(fd)
-            self.fds.clear()
+            self.close()
 
 
 def execute_bulk_updates(requests, factory=Updater, prepare=None, stop=None):
-    results = []
+    # Two phases: vet every item first, then run all exchanges back to back.
+    # Staging does the slow network fetches; bunching the exchanges folds the
+    # shell's file-watcher reloads into one after the batch instead of one per
+    # item. Prepared items always publish: abandoning them would strand
+    # prepared transactions, and each exchange is one atomic syscall.
+    staged = []
+    outcomes = {}
     rescan = None
-    for request in requests:
+    home = None
+    nonce = "%d-%d" % (os.getpid(), time.monotonic_ns())
+
+    def halt(index, reason):
+        for later in range(index, len(requests)):
+            outcomes[later] = {"id": requests[later]["id"], "status": "unchanged; update refused",
+                               "reason": reason}
+
+    for index, request in enumerate(requests):
         if stop is not None and stop.get("cancelled"):
             # A shutdown signal stops the batch: unstarted items are marked
             # stopped, never launched into a worker that SIGKILL may catch
             # mid-publish.
-            results.extend({"id": later["id"], "status": "unchanged; update refused",
-                            "reason": "Stopped: cancelled"} for later in requests[len(results):])
+            halt(index, "Stopped: cancelled")
             break
         updater = None
         try:
             updater = factory()
+            if home is None:
+                home = getattr(updater, "home", None)
             if prepare:
                 prepare(updater)
-            result = updater.execute(request)
+            normalized = updater.prepare_update(request)
         except Exception as error:
+            if updater is not None:
+                updater.close()
             reason = getattr(updater, "reason", "") or reason_text(error)
             result = {"status": "unchanged; update refused", "reason": reason,
                       "backup": getattr(updater, "backup", "")}
-        if updater:
-            try:
-                updater.notify(request, result)
-            except Exception:
-                pass
-        results.append({"id": request["id"], "status": result["status"],
-                        "reason": result.get("reason", "")})
+            outcomes[index] = {"id": request["id"], "status": result["status"], "reason": reason}
+            if updater is not None:
+                try:
+                    updater.notify(request, result)
+                except Exception:
+                    pass
+            if reason == CAPACITY_REASON:
+                halt(index + 1, "Stopped: transaction limit")
+                break
+            continue
+        staged.append((index, request, normalized, updater))
+    for index, request, normalized, updater in staged:
+        # A bounded tail, mirroring the post-publication budget: phase one may
+        # have spent the updater's own deadline on slow fetches.
+        updater.deadline = time.monotonic() + 10
+        try:
+            result = updater.publish_update(normalized)
+        except Exception as error:
+            reason = getattr(updater, "reason", "") or reason_text(error)
+            result = {"status": "unchanged; update refused", "reason": reason}
+        finally:
+            updater.close()
+        try:
+            updater.notify(request, result)
+        except Exception:
+            pass
+        outcomes[index] = {"id": request["id"], "status": result["status"],
+                           "reason": result.get("reason", "")}
         if result["status"].startswith("updated"):
             rescan = updater
-        if result.get("reason", "") == CAPACITY_REASON:
-            results.extend({"id": later["id"], "status": "unchanged; update refused",
-                            "reason": "Stopped: transaction limit"}
-                           for later in requests[len(results):])
-            break
+    results = [outcomes[index] for index in range(len(requests))]
     rescan_result = "not needed"
-    if rescan is not None:
+    if rescan is not None and not (stop is not None and stop.get("cancelled")):
         rescan_result = "failed"
         for attempt in range(BULK_RESCAN_ATTEMPTS):
             if attempt:
@@ -1753,8 +1835,15 @@ def execute_bulk_updates(requests, factory=Updater, prepare=None, stop=None):
                 continue
             rescan_result = "complete"
             break
-    return {"status": "bulk complete", "updates": results, "rescan": rescan_result}
-
+    result = {"status": "bulk complete", "updates": results, "rescan": rescan_result, "nonce": nonce}
+    if home is not None:
+        # Best effort: journals already carry the durable per-transaction
+        # record; a failure here must never cost the result itself.
+        try:
+            write_bulk_summary(home, result)
+        except Exception:
+            pass
+    return result
 
 def bulk_result_timeout(count):
     return UPDATE_RESULT_TIMEOUT * count + BULK_RESCAN_ALLOWANCE
@@ -1839,6 +1928,83 @@ def launch(request, factory=Updater):
     sys.stdout.flush()
 
 
+def _omarchy_dir(home):
+    """The config/omarchy directory descriptor, opened as open_paths does."""
+    worker = Updater(home=home)
+    root = worker.open_home()
+    try:
+        config = checked_dir(root, ".config")
+    except BaseException:
+        os.close(root)
+        raise
+    try:
+        return checked_dir(config, "omarchy")
+    finally:
+        os.close(config)
+        os.close(root)
+
+
+def write_bulk_summary(home, result):
+    """Record the bulk outcome where a reloaded panel finds it.
+
+    Outside the watched plugins tree and the counted updates dir, so the
+    write itself triggers no reload and consumes no capacity.
+    """
+    payload = json.dumps({"schemaVersion": 1, "nonce": result["nonce"], "status": "bulk complete",
+                          "updates": result["updates"], "rescan": result["rescan"]},
+                         ensure_ascii=True, allow_nan=False).encode()
+    omarchy = _omarchy_dir(home)
+    try:
+        fd = os.open(BULK_SUMMARY_NAME, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=omarchy)
+        try:
+            info = os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                    and info.st_nlink == 1 and not info.st_mode & 0o077, "Unsafe summary file")
+            view = memoryview(payload)
+            while view:
+                written = os.write(fd, view)
+                require(written > 0, "Short file write")
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.fsync(omarchy)
+    finally:
+        os.close(omarchy)
+
+
+def consume_bulk_summary(home):
+    """Print and remove the recorded bulk outcome, or an empty object.
+
+    First reader wins; a concurrent second reader finds nothing, which only
+    costs a duplicate status line, never an update.
+    """
+    try:
+        omarchy = _omarchy_dir(home)
+    except (OSError, Refused):
+        return {}
+    try:
+        try:
+            raw, _ = read_file(omarchy, BULK_SUMMARY_NAME, MAX_BULK_SUMMARY)
+        except (OSError, Refused):
+            return {}
+        try:
+            os.unlink(BULK_SUMMARY_NAME, dir_fd=omarchy)
+        except OSError:
+            pass
+        try:
+            document = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            return {}
+        if (type(document) is dict and document.get("status") == "bulk complete"
+                and type(document.get("updates")) is list):
+            return document
+        return {}
+    finally:
+        os.close(omarchy)
+
+
 def serve_update_data_status():
     """Foreground status endpoint: no request parser, fork, network or writes."""
     signals = {}
@@ -1892,6 +2058,13 @@ if __name__ == "__main__":
         sys.exit(serve_cleanup_completed())
     if sys.argv[1:] == ["--update-data-status"]:
         sys.exit(serve_update_data_status())
+    if sys.argv[1:] == ["--consume-bulk-summary"]:
+        # Always succeeds: an absent or unreadable summary reads as none.
+        try:
+            print(json.dumps(consume_bulk_summary(Updater().home)))
+        except Exception:
+            print("{}")
+        sys.exit(0)
     kind = "update"
     try:
         os.umask(0o077)
