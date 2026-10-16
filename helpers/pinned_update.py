@@ -188,16 +188,14 @@ def request_value(value):
     # normalized request re-enters here through launch() and execute().
     value = {k: v for k, v in value.items() if k not in DERIVED}
     keys = set(value)
-    defer_reload = value.get("deferReload", False)
-    require(type(defer_reload) is bool, "Invalid reload setting")
-    if "deferReload" in keys:
-        keys.remove("deferReload")
+    # Only the bulk queue defers the shell reload, and it marks normalized
+    # items after validation; raw requests carrying the flag are refused.
+    require("deferReload" not in value, "Invalid reload setting")
     install = keys == {"schemaVersion", "id", "repository", "verifiedCommit", "section"}
     tip_install = keys == {"schemaVersion", "id", "repository", "branch", "section"}
     verified = keys == {"schemaVersion", "id", "repository", "verifiedCommit", "expectedLocalHead"}
     unverified = keys == {"schemaVersion", "id", "repository", "unverifiedCommit", "expectedLocalHead"}
     require(install or tip_install or verified or unverified, "Invalid request fields")
-    require("deferReload" not in value or verified or unverified, "Invalid reload setting")
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1, "Unsupported request")
     require(isinstance(value["id"], str) and ID.fullmatch(value["id"])
             and ".." not in value["id"] and not value["id"].startswith("omarchy."), "Invalid plugin id")
@@ -1636,7 +1634,16 @@ class Updater:
         return result
 
     def execute(self, value):
+        # Normalized bulk items re-enter here carrying the flag the bulk
+        # queue set after validation; strip it for validation, then restore
+        # it. Raw panel input never carries it (request_value refuses it).
+        deferred = value.get("deferReload", False)
+        require(type(deferred) is bool, "Invalid reload setting")
+        if "deferReload" in value:
+            value = {k: v for k, v in value.items() if k != "deferReload"}
         request = request_value(value)
+        if deferred:
+            request["deferReload"] = True
         try:
             if request["install"]:
                 return self.install(request)
@@ -1695,10 +1702,17 @@ class Updater:
             self.fds.clear()
 
 
-def execute_bulk_updates(requests, factory=Updater, prepare=None):
+def execute_bulk_updates(requests, factory=Updater, prepare=None, stop=None):
     results = []
     rescan = None
     for request in requests:
+        if stop is not None and stop.get("cancelled"):
+            # A shutdown signal stops the batch: unstarted items are marked
+            # stopped, never launched into a worker that SIGKILL may catch
+            # mid-publish.
+            results.extend({"id": later["id"], "status": "unchanged; update refused",
+                            "reason": "Stopped: cancelled"} for later in requests[len(results):])
+            break
         updater = None
         try:
             updater = factory()
@@ -1718,7 +1732,7 @@ def execute_bulk_updates(requests, factory=Updater, prepare=None):
                         "reason": result.get("reason", "")})
         if result["status"].startswith("updated"):
             rescan = updater
-        if "Transaction limit" in result.get("reason", ""):
+        if result.get("reason", "") == CAPACITY_REASON:
             results.extend({"id": later["id"], "status": "unchanged; update refused",
                             "reason": "Stopped: transaction limit"}
                            for later in requests[len(results):])
@@ -1761,12 +1775,18 @@ def launch(request, factory=Updater):
         os.close(null)
         signal.signal(signal.SIGPIPE, signal.SIG_IGN)
         if request_kind(request) == "bulk-update":
-            active = {"updater": None}
+            active = {"updater": None, "cancelled": False}
+
+            def handle_cancel(*_):
+                active["cancelled"] = True
+                if active["updater"] is not None:
+                    active["updater"].cancelled = True
+
             for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-                signal.signal(sig, lambda *_: setattr(active["updater"], "cancelled", True)
-                              if active["updater"] is not None else None)
+                signal.signal(sig, handle_cancel)
             result = execute_bulk_updates(request["bulkUpdates"], factory,
-                                          lambda updater: active.update(updater=updater))
+                                          lambda updater: active.update(updater=updater),
+                                          stop=active)
         else:
             updater = factory()
             for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):

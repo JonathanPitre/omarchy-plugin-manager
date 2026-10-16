@@ -183,17 +183,22 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(calls[0][3], "Pinned plugin update")
 
     def test_bulk_update_can_defer_shell_reload_until_the_queue_finishes(self):
-        request = {**self.request, "deferReload": True}
-        result = self.updater().execute(request)
-        self.assertEqual(result["status"], "updated")
-        self.assertFalse(self.reloaded)
-        journaled = json.loads((Path(result["backup"]).parent / "request.json").read_text())
-        self.assertEqual(journaled, request)
-        self.assertTrue(u.request_value(request)["deferReload"])
+        # Raw requests may not defer the reload; only the bulk queue marks
+        # normalized items after validation.
+        with self.assertRaises(u.Refused):
+            u.request_value({**self.request, "deferReload": True})
         with self.assertRaises(u.Refused):
             u.request_value({**self.install, "deferReload": True})
         with self.assertRaises(u.Refused):
             u.request_value({**self.request, "deferReload": "true"})
+        request = u.bulk_request_value({"schemaVersion": 1,
+                                        "bulkUpdates": [self.request]})["bulkUpdates"][0]
+        self.assertTrue(request["deferReload"])
+        result = self.updater().execute(request)
+        self.assertEqual(result["status"], "updated")
+        self.assertFalse(self.reloaded)
+        journaled = json.loads((Path(result["backup"]).parent / "request.json").read_text())
+        self.assertEqual(journaled, {**self.request, "deferReload": True})
 
     def test_detached_bulk_executor_finishes_bound_updates_after_publication_reload(self):
         requests = [
@@ -271,6 +276,77 @@ class TransactionTests(unittest.TestCase):
         result = u.execute_bulk_updates([u.request_value(self.request)], FixtureUpdater)
         self.assertEqual(len(calls), u.BULK_RESCAN_ATTEMPTS)
         self.assertEqual(result["rescan"], "failed")
+
+    def test_bulk_executor_stops_before_new_items_once_cancelled(self):
+        updates = u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [
+            self.request,
+            dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                 unverifiedCommit=self.new_tip, expectedLocalHead=self.new_base),
+        ]})["bulkUpdates"]
+        calls = []
+
+        class FixtureUpdater:
+            def execute(self, request):
+                calls.append(request["id"])
+                return {"status": "updated"}
+
+            def notify(self, request, result):
+                pass
+
+        result = u.execute_bulk_updates(updates, FixtureUpdater, stop={"cancelled": True})
+        self.assertEqual(calls, [])
+        self.assertEqual([(item["id"], item["status"], item["reason"]) for item in result["updates"]],
+                         [(updates[0]["id"], "unchanged; update refused", "Stopped: cancelled"),
+                          (updates[1]["id"], "unchanged; update refused", "Stopped: cancelled")])
+
+        stop = {"cancelled": False}
+
+        class FlippingUpdater(FixtureUpdater):
+            def execute(self, request):
+                calls.append(request["id"])
+                stop["cancelled"] = True
+                return {"status": "updated"}
+
+            def reload(self):
+                pass
+
+        result = u.execute_bulk_updates(updates, FlippingUpdater, stop=stop)
+        self.assertEqual(calls, [updates[0]["id"]])
+        self.assertEqual([(item["id"], item["status"], item["reason"]) for item in result["updates"]],
+                         [(updates[0]["id"], "updated", ""),
+                          (updates[1]["id"], "unchanged; update refused", "Stopped: cancelled")])
+
+    def test_bulk_executor_stops_only_on_the_exact_capacity_reason(self):
+        updates = u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [
+            self.request,
+            dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                 unverifiedCommit=self.new_tip, expectedLocalHead=self.new_base),
+        ]})["bulkUpdates"]
+        calls = []
+        reasons = {}
+
+        class FixtureUpdater:
+            def execute(self, request):
+                calls.append(request["id"])
+                return {"status": "unchanged; update refused", "reason": reasons[request["id"]]}
+
+            def notify(self, request, result):
+                pass
+
+        reasons.update({updates[0]["id"]: u.CAPACITY_REASON, updates[1]["id"]: "Target moved"})
+        result = u.execute_bulk_updates(updates, FixtureUpdater)
+        self.assertEqual(calls, [updates[0]["id"]])
+        self.assertEqual([(item["id"], item["status"], item["reason"]) for item in result["updates"]],
+                         [(updates[0]["id"], "unchanged; update refused", u.CAPACITY_REASON),
+                          (updates[1]["id"], "unchanged; update refused", "Stopped: transaction limit")])
+
+        calls.clear()
+        reasons.update({updates[0]["id"]: "Transaction limit: review x", updates[1]["id"]: "Target moved"})
+        result = u.execute_bulk_updates(updates, FixtureUpdater)
+        self.assertEqual(calls, [updates[0]["id"], updates[1]["id"]],
+                                "a near-miss reason must not stop the batch")
+        self.assertNotIn("Stopped: transaction limit",
+                         [item["reason"] for item in result["updates"]])
 
     def test_bulk_request_binds_unique_updates_and_rejects_installs(self):
         requests = u.bulk_request_value({"schemaVersion": 1,
