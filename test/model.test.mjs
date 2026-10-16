@@ -1293,13 +1293,14 @@ test("bulk update confirms once and delegates every bound verified or unverified
   const catalog = [{ id: "acme.verified",
     updateSnapshot: { id: "acme.verified", repository: origin, verifiedCommit: target } }]
   const begin = (overrides = {}) => {
-    const pinnedProc = { running: false }, actionProc = { running: false }
+    const pinnedProc = { running: false }, actionProc = { running: false }, summaryProc = { running: false }
     const state = { rows: rows(), catalog, catalogLoaded: true, busy: false,
       busyKind: "", busyId: "", busyRowId: "", pinnedOutput: "", pinnedExited: false,
       pinnedOverflow: false, pinnedHelperPath: "/helpers/pinned_update.py", allowUnverifiedUpdates: true,
       pendingKind: "", pendingId: "", pendingLabel: "", pendingUrl: "", pendingUnverifiedSha: "",
       pendingVerifiedCommit: "", pendingBranch: "", pendingSection: "", pendingPlacementNeeded: false,
       pendingUpdateReport: "", bulkQueue: [], bulkResults: [], bulkPendingRequests: [], bulkActive: false, finished: [], detached: [],
+      summaryOutput: "", summaryOverflow: false, summaryDrainOnly: false, lastBulkSummaryNonce: "",
       setStatus(text, isError) { this.status = { text, isError: isError === true } },
       loadProcessSettled: () => true, updateProcessSettled: () => true,
       requestFreshUpdateCycle() { this.freshCycle = true }, refreshUpdateData() { this.updateRefresh = true },
@@ -1308,13 +1309,14 @@ test("bulk update confirms once and delegates every bound verified or unverified
     state.root = state
     const names = ["updateRequest", "canStartUpdate", "bulkUpdatables", "askBulkUpdate",
       "cancelPending", "confirmPending", "startNextBulk", "runBulkUpdates", "finishBulk",
-      "finishBulkProcess", "finishPinnedUpdate", "runUpdate"]
-    Object.assign(state, Function("Model", "state", "pinnedProc", "actionProc", "Quickshell", `with (state) {
+      "finishBulkProcess", "finishPinnedUpdate", "runUpdate", "consumeBulkSummary", "finishBulkSummary"]
+    Object.assign(state, Function("Model", "state", "pinnedProc", "actionProc", "summaryProc", "Quickshell", `with (state) {
       ${names.map(name => qmlFunction(store, name)).join("\n")}; return {${names.join(",")}}
-    }`)(model, state, pinnedProc, actionProc, {
+    }`)(model, state, pinnedProc, actionProc, summaryProc, {
       env: () => "", execDetached(command) { state.detached.push(command) }
     }))
     state.pinnedProc = pinnedProc
+    state.summaryProc = summaryProc
     return state
   }
   const land = (state, result) => {
@@ -1336,7 +1338,7 @@ test("bulk update confirms once and delegates every bound verified or unverified
   assert.equal(batch.bulkUpdates[1].unverifiedCommit, tip,
     "the setting allows the unverified target in the same confirmed batch")
   assert.equal(state.busyKind, "bulk-update")
-  land(state, { status: "bulk complete", updates: [
+  land(state, { status: "bulk complete", nonce: "1-1", updates: [
     { id: "acme.verified", status: "updated", reason: "" },
     { id: "acme.tip", status: "updated", reason: "" },
   ] })
@@ -1345,6 +1347,29 @@ test("bulk update confirms once and delegates every bound verified or unverified
   assert.equal(state.status.text, "Updated 2, skipped 0")
   assert.equal(state.status.isError, false)
   assert.equal(state.detached.length, 0, "the detached helper owns the final shell rescan")
+  assert.equal(state.summaryProc.running, true, "the live panel consumes the updated summary")
+  assert.deepEqual(state.summaryProc.command.slice(-2), ["--drain-bulk-summary", "1-1"])
+  state.summaryOutput = JSON.stringify({ status: "bulk complete", nonce: "1-1",
+    updates: [{ id: "acme.verified", status: "updated" }], rescan: "complete" })
+  state.finishBulkSummary()
+  assert.equal(state.finished.length, 1, "the live result nonce suppresses summary replay")
+
+  const completedStatus = state.status
+  state.summaryOutput = JSON.stringify({ status: "bulk complete", nonce: "2-1",
+    updates: [{ id: "acme.verified", status: "unchanged; update refused",
+      reason: "Another pinned update is running" }], rescan: "not needed" })
+  state.finishBulkSummary()
+  assert.equal(state.status, completedStatus, "a live drain must not present another batch's report")
+  assert.equal(state.finished.length, 1)
+  assert.equal(state.lastBulkSummaryNonce, "1-1")
+  state.summaryProc.running = false
+  state.consumeBulkSummary()
+  assert.equal(state.summaryProc.command.at(-1), "--consume-bulk-summary")
+  state.summaryOutput = JSON.stringify({ status: "bulk complete", nonce: "3-1",
+    updates: [{ id: "acme.verified", status: "updated" }], rescan: "complete" })
+  state.finishBulkSummary()
+  assert.equal(state.finished.length, 2, "recovery still reports a legitimate unseen batch")
+  assert.equal(state.lastBulkSummaryNonce, "3-1")
 
   // A moved tip skips with a reason instead of installing something else.
   const moved = begin()
@@ -1365,11 +1390,12 @@ test("bulk update confirms once and delegates every bound verified or unverified
   uncertain.confirmPending()
   land(uncertain, { status: "outcome unknown; inspect retained transactions" })
   assert.equal(uncertain.detached.length, 0)
+  assert.equal(uncertain.summaryProc.running, false, "an unknown outcome cannot claim another batch's summary")
 
   const rescanFailure = begin()
   assert.equal(rescanFailure.askBulkUpdate(), true)
   rescanFailure.confirmPending()
-  land(rescanFailure, { status: "bulk complete", rescan: "failed", updates: [
+  land(rescanFailure, { status: "bulk complete", nonce: "1-2", rescan: "failed", updates: [
     { id: "acme.verified", status: "updated", reason: "" },
     { id: "acme.tip", status: "updated", reason: "" },
   ] })
@@ -1379,6 +1405,7 @@ test("bulk update confirms once and delegates every bound verified or unverified
   assert.equal(rescanFailure.rows[0].remoteSha, base, "a failed shell rescan keeps pending update evidence")
   assert.equal(rescanFailure.freshCycle, undefined)
   assert.equal(rescanFailure.updateRefresh, undefined)
+  assert.equal(rescanFailure.summaryProc.running, true, "a failed rescan still consumes the live summary")
 
   const updateReloadFailure = begin()
   updateReloadFailure.askBulkUpdate()
@@ -1412,7 +1439,7 @@ test("bulk update confirms once and delegates every bound verified or unverified
   const limited = begin()
   assert.equal(limited.askBulkUpdate(), true)
   limited.confirmPending()
-  land(limited, { status: "bulk complete", updates: [
+  land(limited, { status: "bulk complete", nonce: "1-3", updates: [
     { id: "acme.verified", status: "unchanged; update refused", reason: "Transaction limit: review x" },
     { id: "acme.tip", status: "unchanged; update refused", reason: "Stopped: transaction limit" },
   ] })
@@ -1420,18 +1447,32 @@ test("bulk update confirms once and delegates every bound verified or unverified
   assert.equal(limited.status.text,
     "Updated 0, skipped 2 (Verified: Transaction limit: review x; Tip: Stopped: transaction limit)")
   assert.equal(limited.detached.length, 0, "a run with no successful changes does not rescan the shell")
+  assert.equal(limited.summaryProc.running, true, "an all-refused live batch consumes its summary")
+})
+
+test("bulk progress stays visible while either surface is busy", () => {
+  for (const surface of ["Panel.qml", "Expanded.qml"]) {
+    const qml = readFileSync(new URL("../" + surface, import.meta.url), "utf8")
+    const start = qml.lastIndexOf("text: {", qml.indexOf("if (root.settingsOpen) return root.statusSource"))
+    const end = qml.indexOf("\n", qml.indexOf("return root.status", qml.indexOf("if (root.busy)", start)))
+    const body = qml.slice(start + "text: {".length, end)
+    const status = "Updating 2 plugins; stopping finishes preparation; checked updates still apply; closing this window does not cancel it"
+    const root = { busy: true, busyKind: "bulk-update", busyId: "Update all", status }
+    assert.equal(Function("root", "Model", body)(root, Model), status, surface)
+  }
 })
 
 test("a reloaded store reports a recorded bulk summary once, then never again", () => {
   const store = readFileSync(new URL("../PluginStore.qml", import.meta.url), "utf8")
   assert.match(store, /id: summaryProc/)
-  assert.match(store, /pinnedHelperPath, "--consume-bulk-summary"\]/)
+  assert.match(store, /\["--consume-bulk-summary"\]/)
   assert.match(store, /if \(!busy && !bulkActive\) consumeBulkSummary\(\)/)
   const target = "b".repeat(40), base = "a".repeat(40)
   const model = Function(source + "; return { findRow, bulkUpdateSummary, applyUpdateReport, applyPinnedUpdates, parseUpdateReport }")()
   const state = { rows: [{ id: "acme.plugin", name: "Plugin" }], busy: false, bulkActive: false,
     bulkQueue: [], bulkPendingRequests: [], bulkResults: [], pinnedOutput: "", pinnedOverflow: false,
     bulkRescanFailed: false, lastBulkSummaryNonce: "", summaryOutput: "", summaryOverflow: false,
+    summaryDrainOnly: false,
     pendingUpdateReport: "", allowUnverifiedUpdates: false, catalog: [],
     setStatus(text, isError) { this.status = { text, isError: isError === true } },
     requestFreshUpdateCycle() { this.freshCycle = true }, refreshUpdateData() { this.updateRefresh = true },
@@ -4057,7 +4098,7 @@ test("installing runs the pinned helper on the verified commit, never the host a
   for (const status of ["installed", "installed; reload failed", "installed; enable failed",
     "installed; finalization failed", "unchanged; install refused", "unchanged; request refused"])
     assert.ok(store.includes(`"${status}"`), status)
-  assert.match(store, /if \(!pinnedExited\) return\s+if \(busyKind === "bulk-update"\) \{\s*finishBulkProcess\(\)/)
+  assert.match(store, /if \(!pinnedExited\) return\s+if \(busyKind === "bulk-update"\) \{\s*var nonce = finishBulkProcess\(\)/)
   // A re-derived request is what actually runs: the dialog's answer is bound
   // to the snapshot the live catalog still names.
   assert.match(store, /function startAdd\(section\) \{[\s\S]*?String\(request\.verifiedCommit \|\| ""\) !== commit[\s\S]*?launchInstall\(request, label\)/)
