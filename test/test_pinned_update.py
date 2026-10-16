@@ -198,7 +198,34 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(result["status"], "updated")
         self.assertFalse(self.reloaded)
         journaled = json.loads((Path(result["backup"]).parent / "request.json").read_text())
-        self.assertEqual(journaled, {**self.request, "deferReload": True})
+        self.assertNotIn("deferReload", journaled)
+        self.assertEqual(journaled, self.request)
+
+    def test_completed_bulk_transaction_archives_at_capacity_and_cleans_up(self):
+        # The journal carries no runtime-only flag, so the archive and
+        # cleanup paths that re-validate it accept bulk history.
+        bulk = u.bulk_request_value({"schemaVersion": 1,
+                                     "bulkUpdates": [self.request]})["bulkUpdates"]
+        result = u.execute_bulk_updates(bulk, lambda: self.updater())
+        self.assertEqual(result["status"], "bulk complete")
+        self.assertEqual([item["status"] for item in result["updates"]], ["updated"])
+        state = self.home / ".config/omarchy/plugin-manager-updates"
+        names = [p.name for p in state.iterdir()]
+        self.assertEqual(len(names), 1)
+        name = names[0]
+        for number in range(31):
+            (state / ("pending-%d" % number)).mkdir(mode=0o700)
+        updater = self.updater()
+        try:
+            updater.open_paths("acme.plugin")
+        finally:
+            for fd in reversed(updater.fds):
+                os.close(fd)
+            updater.fds.clear()
+        self.assertFalse((state / name).exists())
+        self.assertTrue((self.home / ".config/omarchy/plugin-manager-updates-archive" / name).exists())
+        result = u.cleanup_completed(self.updater())
+        self.assertEqual(result["status"], "complete")
 
     def test_detached_bulk_executor_finishes_bound_updates_after_publication_reload(self):
         requests = [

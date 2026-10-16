@@ -254,7 +254,9 @@ def catalog_request(value):
 
 def journal_value(request):
     """The request exactly as the panel sent it, with no derived key added."""
-    return {k: v for k, v in request.items() if k not in DERIVED}
+    # deferReload is runtime-only queue state, never panel input: journals
+    # stay valid for later re-validation by request_value.
+    return {k: v for k, v in request.items() if k not in DERIVED and k != "deferReload"}
 
 
 def request_kind(value):
