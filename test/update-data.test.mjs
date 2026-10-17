@@ -403,6 +403,9 @@ test("both surfaces expose the history limit and near-limit warning", () => {
     assert.match(source, /store\.adjustTransactionLimit\(Model\.TRANSACTION_LIMIT_STEP\)/)
     assert.match(source, /Model\.updateDataNearLimit\(store\.updateDataStatus\)/)
     assert.match(source, /Model\.transactionLimitFallback\(store\.updateDataStatus, store\.transactionLimit\)/)
+    // The hidden warning still evaluates its text before the first status loads.
+    assert.doesNotMatch(source, /\+ store\.updateDataStatus\.limit \+/, `${file} unguarded limit read`)
+    assert.match(source, /\(store\.updateDataStatus \? store\.updateDataStatus\.limit : ""\)/, `${file} guarded limit read`)
     assert.match(source, /store\.transactionLimitFloor/)
     assert.match(source, /store\.transactionLimit/)
     assert.match(source, /History now: " \+ store\.updateDataCount/)

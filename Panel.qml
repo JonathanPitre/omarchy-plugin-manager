@@ -2259,7 +2259,7 @@ Panel {
                 visible: Model.transactionLimitFallback(store.updateDataStatus, store.transactionLimit)
                 height: visible ? implicitHeight : 0
                 width: parent.width
-                text: "The helper is using " + store.updateDataStatus.limit + ": the saved value was unreadable, so the default applies."
+                text: "The helper is using " + (store.updateDataStatus ? store.updateDataStatus.limit : "") + ": the saved value was unreadable, so the default applies."
                 color: root.contentForeground
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.caption
