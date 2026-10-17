@@ -4726,7 +4726,7 @@ test("the expanded search box is captioned and sized like the filter dropdowns",
   // Same caption above, same control height below, same body text size —
   // so the search reads as the first control in the row, not an odd one out.
   assert.match(control, /id: searchLabel[\s\S]*?text: "Search"[\s\S]*?font\.pixelSize: Style\.font\.caption[\s\S]*?font\.bold: true/)
-  assert.match(control, /id: searchField[\s\S]*?anchors\.bottom: parent\.bottom[\s\S]*?height: Style\.spacing\.controlHeight/)
+  assert.match(control, /id: searchFieldLoader[^}]*?anchors\.bottom: parent\.bottom\s*height: Style\.spacing\.controlHeight/)
   assert.match(control, /id: searchField[\s\S]*?font\.pixelSize: Style\.font\.body/)
   assert.doesNotMatch(control, /verticalPadding: Style\.spacing\.xs/)
   assert.match(expanded, /id: searchControl\s*anchors\.left: parent\.left\s*anchors\.top: parent\.top\s*anchors\.bottom: parent\.bottom\s*anchors\.right: root\.browsing \? browseFilters\.left : installedFilters\.left/)
@@ -4750,12 +4750,12 @@ test("the expanded search box grows the popup's clear (x) button once a term is 
   const control = expanded.slice(expanded.indexOf("id: searchControl"), expanded.indexOf("id: installedFilters"))
   // Same glyph, same trigger as the popup: the button exists only while
   // there is something to clear, and the field gives it room only then.
-  assert.match(control, /PanelActionButton \{\s*id: clearSearchButton[\s\S]*?visible: searchField\.text !== ""[\s\S]*?iconText: "󰅙"[\s\S]*?tooltipText: "Clear the search"/)
+  assert.match(control, /PanelActionButton \{\s*id: clearSearchButton[\s\S]*?visible: root\.searchText !== ""[\s\S]*?iconText: "󰅙"[\s\S]*?tooltipText: "Clear the search"/)
   assert.match(control, /id: clearSearchButton[\s\S]*?onClicked: \{\s*root\.clearSearch\(\)\s*root\.returnFocusToList\(\)\s*\}/)
-  assert.match(control, /id: searchField[\s\S]*?anchors\.right: clearSearchButton\.visible \? clearSearchButton\.left : parent\.right\s*anchors\.rightMargin: clearSearchButton\.visible \? Style\.space\(4\) : 0/)
+  assert.match(control, /id: searchFieldLoader[\s\S]*?anchors\.right: clearSearchButton\.visible \? clearSearchButton\.left : parent\.right\s*anchors\.rightMargin: clearSearchButton\.visible \? Style\.space\(4\) : 0/)
   // One clearing path for the button, Escape, and "Clear filters" alike.
-  assert.match(expanded, /function clearSearch\(\) \{\s*searchField\.text = ""\s*\}/)
-  assert.match(control, /if \(searchField\.text !== ""\) root\.clearSearch\(\)/)
+  assert.match(expanded, /function clearSearch\(\) \{\s*searchText = ""\s*\}/)
+  assert.match(control, /if \(root\.searchText !== ""\) root\.clearSearch\(\)/)
   assert.match(expanded, /function clearCatalogFilters\(\) \{[\s\S]*?clearSearch\(\)[\s\S]*?selectedIndex = -1/)
 })
 
@@ -5078,20 +5078,18 @@ function expandedKeyHarness(state = {}) {
   const calls = []
   const root = { browsing: true, detailsOpen: true, confirming: false, placing: false,
     closeDetails: () => calls.push("back"), dismiss: () => calls.push("dismiss"),
-    switchTab: tab => calls.push(tab), ...state }
-  const searchField = { activeFocus: false }
+    switchTab: tab => calls.push(tab), searchFieldFocused: false, ...state }
   const Qt = { Key_Backspace: "Backspace", Key_Escape: "Escape" }
-  const press = Function("root", "searchField", "Qt",
-    `${qmlFunction(source, "expandedKey")}; return expandedKey`)(root, searchField, Qt)
-  return { calls, searchField, press }
+  const press = Function("root", "Qt",
+    `${qmlFunction(source, "expandedKey")}; return expandedKey`)(root, Qt)
+  return { calls, root, press }
 }
 
 test("expanded Browse details Backspace returns only outside search and modals", () => {
   for (const browsing of [true, false]) for (const detailsOpen of [true, false]) {
     for (const activeFocus of [false, true]) for (const modal of [null, "confirming", "placing"]) {
-      const { calls, searchField, press } = expandedKeyHarness({ browsing, detailsOpen,
-        confirming: modal === "confirming", placing: modal === "placing" })
-      searchField.activeFocus = activeFocus
+      const { calls, press } = expandedKeyHarness({ browsing, detailsOpen,
+        confirming: modal === "confirming", placing: modal === "placing", searchFieldFocused: activeFocus })
       const event = { key: "Backspace", text: "\b", accepted: false }
       press(event)
       const backs = browsing && detailsOpen && !activeFocus && !modal

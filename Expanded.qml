@@ -47,7 +47,7 @@ Item {
 
   // One card, two hosts. The card is declared once and reparented into
   // whichever window is up, so every root.* reference to keyCatcher,
-  // searchField or listScroll keeps resolving across the move.
+  // searchFieldLoader or listScroll keeps resolving across the move.
   readonly property Item cardHost: tiled ? tiledWindow.contentItem : window.contentItem
 
   // The window type has to be known before the first frame, and the store's
@@ -381,17 +381,35 @@ Item {
   // card, and a word typed at speed would rebuild them once per letter.
   // Clearing applies at once, so Escape and the clear button feel immediate.
   property string searchQuery: ""
+  // What the search box shows, owned here rather than by the box. The box only
+  // exists while the window is open (see searchFieldLoader), so the term has to
+  // outlive it: closing keeps it, and the next open shows it again.
+  property string searchText: ""
+  // The box itself is null while the window is closed, so a focus question has
+  // to be one that answers false then rather than one that throws.
+  readonly property bool searchFieldFocused: searchFieldLoader.item !== null && searchFieldLoader.item.activeFocus
+
+  onSearchTextChanged: {
+    if (searchText === "") flushSearch()
+    else searchDebounce.restart()
+  }
 
   Timer {
     id: searchDebounce
     interval: 150
     repeat: false
-    onTriggered: root.searchQuery = searchField.text
+    onTriggered: root.searchQuery = root.searchText
   }
 
   function flushSearch() {
     searchDebounce.stop()
-    searchQuery = searchField.text
+    searchQuery = searchText
+  }
+
+  function focusSearchField() {
+    var field = searchFieldLoader.item
+    if (!field) return
+    field.forceActiveFocus()
   }
 
   // The same three filters as the popup, with the same replay handlers:
@@ -507,7 +525,7 @@ Item {
   function cycleCatalogSort() { catalogSort = Model.nextOption(catalogSortOptions, catalogSort); selectedIndex = -1 }
 
   function clearSearch() {
-    searchField.text = ""
+    searchText = ""
   }
 
   function clearCatalogFilters() {
@@ -798,15 +816,15 @@ Item {
           root.dismiss()
           event.accepted = true
         }
-        else if (event.key === Qt.Key_Backspace && root.arrangeOpen && !searchField.activeFocus) {
+        else if (event.key === Qt.Key_Backspace && root.arrangeOpen && !root.searchFieldFocused) {
           root.closeArrange()
           event.accepted = true
         }
-        else if (event.key === Qt.Key_Backspace && root.settingsOpen && !searchField.activeFocus) {
+        else if (event.key === Qt.Key_Backspace && root.settingsOpen && !root.searchFieldFocused) {
           root.closeSettings()
           event.accepted = true
         }
-        else if (event.key === Qt.Key_Backspace && root.browsing && root.detailsOpen && !searchField.activeFocus) {
+        else if (event.key === Qt.Key_Backspace && root.browsing && root.detailsOpen && !root.searchFieldFocused) {
           root.closeDetails()
           event.accepted = true
         }
@@ -834,7 +852,7 @@ Item {
         else if ((text === "u" || text === "U") && !root.browsing) { store.askBulkUpdate(); event.accepted = true }
         else if ((text === "c" || text === "C") && root.browsing) root.cycleCategoryFilter()
         else if ((text === "a" || text === "A") && root.browsing) root.cycleAvailabilityFilter()
-        else if (text === "/") { searchField.forceActiveFocus(); event.accepted = true }
+        else if (text === "/") { root.focusSearchField(); event.accepted = true }
         else if (text === "r" || text === "R") {
           if (root.browsing) store.loadCatalog(true)
           else { store.reload(); store.checkUpdates() }
@@ -1200,8 +1218,12 @@ Item {
             font.bold: true
           }
 
-          TextField {
-            id: searchField
+          // The box exists only while the window is open: a Qt Quick text
+          // input subscribes to the system clipboard for as long as it lives,
+          // and this window is kept loaded between summons. The loader holds
+          // the box's place in the row; the term lives on root.searchText.
+          Loader {
+            id: searchFieldLoader
             anchors.left: parent.left
             // The field gives the clear button room only while it shows,
             // so an empty search box runs the full width like the others.
@@ -1209,27 +1231,33 @@ Item {
             anchors.rightMargin: clearSearchButton.visible ? Style.space(4) : 0
             anchors.bottom: parent.bottom
             height: Style.spacing.controlHeight
-            placeholderText: root.browsing ? "󰍉  Search the catalog…" : "󰍉  Search by name…"
-            foreground: root.foreground
-            placeholderTextColor: root.secondaryForeground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
+            active: root.opened
+            sourceComponent: Component {
+              TextField {
+                id: searchField
+                text: root.searchText
+                // A search term never needs more, and the cap holds for pasted text too.
+                maximumLength: 256
+                placeholderText: root.browsing ? "󰍉  Search the catalog…" : "󰍉  Search by name…"
+                foreground: root.foreground
+                placeholderTextColor: root.secondaryForeground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
 
-            onTextChanged: {
-              if (text === "") root.flushSearch()
-              else searchDebounce.restart()
-            }
-            onAccepted: {
-              root.flushSearch()
-              root.returnFocusToList()
-            }
-            Keys.onPressed: function(event) {
-              if (event.key !== Qt.Key_Escape) return
-              // Escape clears before it leaves: a search box that keeps a
-              // stale term after you back out of it silently hides plugins.
-              if (searchField.text !== "") root.clearSearch()
-              else root.returnFocusToList()
-              event.accepted = true
+                onTextChanged: root.searchText = text
+                onAccepted: {
+                  root.flushSearch()
+                  root.returnFocusToList()
+                }
+                Keys.onPressed: function(event) {
+                  if (event.key !== Qt.Key_Escape) return
+                  // Escape clears before it leaves: a search box that keeps a
+                  // stale term after you back out of it silently hides plugins.
+                  if (root.searchText !== "") root.clearSearch()
+                  else root.returnFocusToList()
+                  event.accepted = true
+                }
+              }
             }
           }
 
@@ -1238,8 +1266,8 @@ Item {
           PanelActionButton {
             id: clearSearchButton
             anchors.right: parent.right
-            anchors.verticalCenter: searchField.verticalCenter
-            visible: searchField.text !== ""
+            anchors.verticalCenter: searchFieldLoader.verticalCenter
+            visible: root.searchText !== ""
             iconText: "󰅙"
             tooltipText: "Clear the search"
             foreground: root.foreground

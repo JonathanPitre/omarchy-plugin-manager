@@ -459,7 +459,7 @@ function placementPopup(owner = { busy: false, pending: false, status: "Moved", 
   const p = popup(owner), s = p.state
   Object.assign(s, { Model, pendingKind: "move", pendingPlacementNeeded: false, pendingId: "a",
     rows: [{ id: "a", name: "A", enabled: true, kinds: ["bar-widget"], barSection: "left" }],
-    searchField: { text: "A" }, searchQuery: "A", groupFilter: "all", kindFilter: "all", statusFilter: "all",
+    searchText: "A", searchQuery: "A", groupFilter: "all", kindFilter: "all", statusFilter: "all",
     kindOptions: [{ value: "all" }, { value: "bar" }], listColumn: { forceLayout() {} },
     listScroll: { contentY: 125, contentHeight: 500, height: 200 }, selectedIndex: 0,
     placementRefreshStarted: false, placementRowsReady: false, loading: false, loadError: "",
@@ -513,7 +513,7 @@ test("Installed restoration waits for fresh rows, preserves view, and safely los
     s.rows = missing ? [] : [{ id: "a", name: "Refreshed" }]; s.visibleRows = s.rows
     s.loading = false; s.clampSelection = () => {}
     Function("root", panelSource.match(/function onRowsLoaded\(\) \{([\s\S]*?)\n    \}/)[1])(s)
-    s.activeTab = "browse"; s.searchField.text = "other"; s.listScroll.contentY = 0
+    s.activeTab = "browse"; s.searchText = "other"; s.listScroll.contentY = 0
     assert.equal(s.openPlacementView(origin, false), true)
     assert.equal(s.activeTab, "installed"); assert.equal(s.searchQuery, "A")
     assert.deepEqual([s.groupFilter, s.kindFilter, s.statusFilter], ["installed", "bar", "enabled"])

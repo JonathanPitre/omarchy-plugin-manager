@@ -113,17 +113,29 @@ Panel {
   // card, and a word typed at speed would rebuild them once per letter.
   // Clearing applies at once, so Escape and the clear button feel immediate.
   property string searchQuery: ""
+  // What the search box shows, owned here rather than by the box. The box only
+  // exists while the popup is open (see searchFieldLoader), so the term has to
+  // outlive it: closing keeps it, and the next open shows it again.
+  property string searchText: ""
+  // The box itself is null while the popup is closed, so a focus question has
+  // to be one that answers false then rather than one that throws.
+  readonly property bool searchFieldFocused: searchFieldLoader.item !== null && searchFieldLoader.item.activeFocus
+
+  onSearchTextChanged: {
+    if (searchText === "") flushSearch()
+    else searchDebounce.restart()
+  }
 
   Timer {
     id: searchDebounce
     interval: 150
     repeat: false
-    onTriggered: root.searchQuery = searchField.text
+    onTriggered: root.searchQuery = root.searchText
   }
 
   function flushSearch() {
     searchDebounce.stop()
-    searchQuery = searchField.text
+    searchQuery = searchText
   }
 
   // A reload can remove the last plugin of a kind. Falling back immediately
@@ -272,7 +284,7 @@ Panel {
     var kindAvailable = kindOptions.some(function(option) { return option.value === origin.kind })
     kindFilter = kindAvailable ? origin.kind : "all"
     statusFilter = origin.status
-    searchField.text = origin.query
+    searchText = origin.query
     flushSearch()
     selectedIndex = -1
     if (placementRowsReady) {
@@ -598,7 +610,7 @@ Panel {
 
   function clearSearch() {
     closeArrange()
-    searchField.text = ""
+    searchText = ""
   }
 
   function setCategoryFilter(category) {
@@ -648,7 +660,7 @@ Panel {
     categoryFilter = cleared.category
     catalogKindFilter = cleared.kind
     availabilityFilter = cleared.availability
-    searchField.text = cleared.query
+    searchText = cleared.query
     resetSelection()
   }
 
@@ -742,7 +754,7 @@ Panel {
       return
     }
     var origin = { tab: "installed", selectedId: selectedRow ? selectedRow.id : pendingId,
-      query: searchField.text, group: groupFilter, kind: kindFilter, status: statusFilter,
+      query: searchText, group: groupFilter, kind: kindFilter, status: statusFilter,
       scroll: Math.max(0, listScroll.contentY) }
     if (!hostWidget.requestPopupMove(plan.snapshot, plan.fromSection, plan.fromIndex, plan.section, plan.gap, origin)) {
       setStatus("Placement was refused; no move was sent. Cancel and refresh before choosing again.", true, "layout")
@@ -806,8 +818,10 @@ Panel {
   }
 
   function focusSearchField() {
-    searchField.forceActiveFocus()
-    searchField.selectAll()
+    var field = searchFieldLoader.item
+    if (!field) return
+    field.forceActiveFocus()
+    field.selectAll()
   }
 
   function returnFocusToList() {
@@ -850,7 +864,7 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       blocked: root.confirming || root.placing || root.detailsOpen || root.settingsOpen || root.arrangeOpen
-        || searchField.activeFocus
+        || root.searchFieldFocused
         || groupDropdown.popupOpen || kindDropdown.popupOpen || statusDropdown.popupOpen || categoryDropdown.popupOpen
         || catalogKindDropdown.popupOpen || availabilityDropdown.popupOpen || sortDropdown.popupOpen
 
@@ -1492,40 +1506,52 @@ Panel {
             }
           }
 
-          TextField {
-            id: searchField
+          // The box exists only while the popup is open. A Qt Quick text
+          // input subscribes to the system clipboard for as long as it lives,
+          // and the popup itself stays loaded for the shell's lifetime, so a
+          // box kept around while hidden would make the shell read every
+          // clipboard offer another program makes. The loader holds the box's
+          // place in the layout; the term lives on root.searchText.
+          Loader {
+            id: searchFieldLoader
             anchors.left: parent.left
             anchors.right: clearFiltersButton.visible ? clearFiltersButton.left : parent.right
             anchors.rightMargin: clearFiltersButton.visible ? Style.space(4) : 0
             y: filterControls.filterRowHeight + Style.space(8)
             height: filterControls.controlHeight
-            // The glyph rides in the placeholder rather than sitting in its
-            // own column: the row is the search box and nothing else.
-            placeholderText: root.browsing ? "󰍉  Search the catalog…" : "󰍉  Search by name…"
-            foreground: root.contentForeground
-            placeholderTextColor: root.secondaryForeground
-            font.family: root.contentFontFamily
-            font.pixelSize: Style.font.caption
-            verticalPadding: Style.spacing.xs
+            active: root.opened
+            sourceComponent: Component {
+              TextField {
+                id: searchField
+                text: root.searchText
+                // A search term never needs more, and the cap holds for pasted text too.
+                maximumLength: 256
+                // The glyph rides in the placeholder rather than sitting in its
+                // own column: the row is the search box and nothing else.
+                placeholderText: root.browsing ? "󰍉  Search the catalog…" : "󰍉  Search by name…"
+                foreground: root.contentForeground
+                placeholderTextColor: root.secondaryForeground
+                font.family: root.contentFontFamily
+                font.pixelSize: Style.font.caption
+                verticalPadding: Style.spacing.xs
 
-            // Enter hands the list back the keyboard with the results in
-            // place, so you can type a name and arrow straight into it.
-            onTextEdited: root.closeArrange()
-            onTextChanged: {
-              if (text === "") root.flushSearch()
-              else searchDebounce.restart()
-            }
-            onAccepted: {
-              root.flushSearch()
-              root.returnFocusToList()
-            }
-            Keys.onPressed: function(event) {
-              if (event.key !== Qt.Key_Escape) return
-              // Escape clears before it leaves: a search box that keeps a
-              // stale term after you back out of it silently hides plugins.
-              if (searchField.text !== "") root.clearSearch()
-              else root.returnFocusToList()
-              event.accepted = true
+                // Enter hands the list back the keyboard with the results in
+                // place, so you can type a name and arrow straight into it.
+                onTextEdited: root.closeArrange()
+                onTextChanged: root.searchText = text
+                onAccepted: {
+                  root.flushSearch()
+                  root.returnFocusToList()
+                }
+                Keys.onPressed: function(event) {
+                  if (event.key !== Qt.Key_Escape) return
+                  // Escape clears before it leaves: a search box that keeps a
+                  // stale term after you back out of it silently hides plugins.
+                  if (root.searchText !== "") root.clearSearch()
+                  else root.returnFocusToList()
+                  event.accepted = true
+                }
+              }
             }
           }
 
@@ -1533,7 +1559,7 @@ Panel {
             id: clearFiltersButton
             anchors.right: parent.right
             y: filterControls.filterRowHeight + Style.space(8)
-            visible: root.browsing ? (root.catalogFiltered || searchField.text !== "") : searchField.text !== ""
+            visible: root.browsing ? (root.catalogFiltered || root.searchText !== "") : root.searchText !== ""
             iconText: "󰅙"
             tooltipText: root.browsing ? "Clear Browse filters" : "Clear the search"
             foreground: root.contentForeground
