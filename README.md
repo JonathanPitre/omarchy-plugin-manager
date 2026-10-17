@@ -654,6 +654,10 @@ Never resolve a collision by overwriting an archived transaction.
 
 Once clicked, the finite worker runs independently of the QML observer. Closing
 the window is **not cancellation**, including during a manager self-update.
+For a bulk update, a worker stop signal finishes the current preparation and
+skips unstarted items. Already checked updates still apply after final safety
+checks, followed by a shell rescan and the recorded summary. There is no bulk
+Stop control in the panel.
 The already-loaded Python worker retains no dependency on reopening its helper
 source after publication. Its bounded notification and transaction records
 outlive the window. A rescan failure reports **updated; reload failed** or
@@ -857,7 +861,7 @@ url cannot become a command. Urls are also validated against `https://`,
 | `t` | Installed: cycle the Status dropdown |
 | `c` `a` | Browse: cycle the Category and Availability dropdowns |
 | `1` `2` | Switch to the Installed / Browse tab |
-| `r` | Re-read the plugin list or re-fetch the active Browse catalog |
+| `r` | Refresh the plugin list or re-fetch the active Browse catalog |
 | `Esc` | Clear the search, then leave the field, then close the panel |
 
 In the popup's Browse details, `Tab`, `Shift+Tab`, and the arrow keys move

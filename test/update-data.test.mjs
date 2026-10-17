@@ -153,6 +153,7 @@ function storeHarness() {
     cleanupProcess: null, cleanupOutcome: "", cleanupIsError: false, updateDataDestroying: false,
     externalBusy: false, busyKind: "", barMovePending: null, pendingKind: "", pendingId: "",
     pinnedHelperPath: "/bundle/helper.py", actionProc: { running: false }, pinnedProc: { running: false },
+    bulkActive: false, bulkQueue: [], bulkResults: [],
     Qt: { callLater: callback => later.push(callback) }, setStatus() {},
     updateDataProcessComponent: { createObject(owner, properties) {
       const proc = { ...properties, output: "", outputBytes: 0, errorBytes: 0, overflow: false,

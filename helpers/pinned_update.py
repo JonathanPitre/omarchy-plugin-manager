@@ -95,6 +95,16 @@ MAX_DISK = 128 * 1024 * 1024
 TRANSACTION_LIMIT = 32
 ARCHIVE_NAME = "plugin-manager-updates-archive"
 MAX_UPDATE_STATUS = 8192
+MAX_BULK_REQUEST = 32768
+MAX_BULK_RESULT = 65536
+BULK_SUMMARY_NAME = "plugin-manager-bulk-summary.json"
+MAX_BULK_SUMMARY = 65536
+UPDATE_RESULT_TIMEOUT = 140
+BULK_RESCAN_ATTEMPTS = 3
+BULK_RESCAN_TIMEOUT = 10
+BULK_RESCAN_PAUSE = 0.25
+BULK_RESCAN_ALLOWANCE = (BULK_RESCAN_ATTEMPTS * BULK_RESCAN_TIMEOUT
+                         + (BULK_RESCAN_ATTEMPTS - 1) * BULK_RESCAN_PAUSE + 1)
 CAPACITY_REASON = ("Transaction limit: review ~/.config/omarchy/plugin-manager-updates "
                    "using README recovery guidance before retrying")
 ARCHIVE_REASON = ("Archive unsafe or incomplete: inspect active and archived transactions "
@@ -180,6 +190,9 @@ def request_value(value):
     # normalized request re-enters here through launch() and execute().
     value = {k: v for k, v in value.items() if k not in DERIVED}
     keys = set(value)
+    # Only the bulk queue defers the shell reload, and it marks normalized
+    # items after validation; raw requests carrying the flag are refused.
+    require("deferReload" not in value, "Invalid reload setting")
     install = keys == {"schemaVersion", "id", "repository", "verifiedCommit", "section"}
     tip_install = keys == {"schemaVersion", "id", "repository", "branch", "section"}
     verified = keys == {"schemaVersion", "id", "repository", "verifiedCommit", "expectedLocalHead"}
@@ -213,6 +226,24 @@ def request_value(value):
     return normalized
 
 
+def bulk_request_value(value):
+    require(type(value) is dict and set(value) == {"schemaVersion", "bulkUpdates"}
+            and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1,
+            "Invalid bulk update request")
+    updates = value["bulkUpdates"]
+    require(type(updates) is list and len(updates) > 0, "Invalid bulk update count")
+    normalized = []
+    ids = set()
+    for update in updates:
+        request = request_value(update)
+        require(not request["install"], "Bulk updates cannot install plugins")
+        require(request["id"] not in ids, "Duplicate bulk update")
+        ids.add(request["id"])
+        request["deferReload"] = True
+        normalized.append(request)
+    return {"schemaVersion": 1, "bulkUpdates": normalized}
+
+
 def catalog_request(value):
     """The one non-transaction shape: exactly a schema version and a force flag."""
     require(type(value) is dict and set(value) == {"schemaVersion", "catalog"}, "Invalid catalog request")
@@ -225,7 +256,9 @@ def catalog_request(value):
 
 def journal_value(request):
     """The request exactly as the panel sent it, with no derived key added."""
-    return {k: v for k, v in request.items() if k not in DERIVED}
+    # deferReload is runtime-only queue state, never panel input: journals
+    # stay valid for later re-validation by request_value.
+    return {k: v for k, v in request.items() if k not in DERIVED and k != "deferReload"}
 
 
 def request_kind(value):
@@ -234,6 +267,8 @@ def request_kind(value):
         return "update"
     if "catalog" in value:
         return "catalog"
+    if "bulkUpdates" in value:
+        return "bulk-update"
     return "install" if "section" in value else "update"
 
 
@@ -1077,13 +1112,32 @@ class Updater:
             self.fds.clear()
         return result
 
-    def open_paths(self, plugin_id, install=False):
+    def open_update_lock(self, update_lock=None):
         fd = self.open_home()
         for part in (".config", "omarchy"):
             child = self.hold(checked_dir(fd, part))
             self.anchors.append((fd, part, identity(child)))
             fd = child
         self.omarchy = fd
+        try:
+            os.mkdir("plugin-manager-updates", 0o700, dir_fd=fd)
+            os.fsync(fd)
+        except FileExistsError:
+            pass
+        self.state = self.hold(checked_dir(fd, "plugin-manager-updates", private=True))
+        if update_lock is None:
+            try:
+                fcntl.flock(self.state, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise Refused("Another pinned update is running") from error
+        else:
+            require(identity(self.state) == identity(update_lock), "Directory identity changed")
+            self.state = self.hold(os.dup(update_lock))
+        self.anchors.append((fd, "plugin-manager-updates", identity(self.state)))
+
+    def open_paths(self, plugin_id, install=False, update_lock=None):
+        self.open_update_lock(update_lock)
+        fd = self.omarchy
         self.plugins = self.hold(checked_dir(fd, "plugins"))
         self.anchors.append((fd, "plugins", identity(self.plugins)))
         if install:
@@ -1100,18 +1154,7 @@ class Updater:
         else:
             self.original = self.hold(checked_dir(self.plugins, plugin_id))
             self.anchors.append((self.plugins, plugin_id, identity(self.original)))
-        try:
-            os.mkdir("plugin-manager-updates", 0o700, dir_fd=fd)
-            os.fsync(fd)
-        except FileExistsError:
-            pass
-        self.state = self.hold(checked_dir(fd, "plugin-manager-updates", private=True))
         require(os.fstat(self.state).st_dev == os.fstat(self.plugins).st_dev, "Staging must share filesystem")
-        try:
-            fcntl.flock(self.state, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise Refused("Another pinned update is running") from error
-        self.anchors.append((fd, "plugin-manager-updates", identity(self.state)))
         self.archive_at_capacity()
 
     def active_transactions(self):
@@ -1602,12 +1645,29 @@ class Updater:
         create_file(self.tx, "result.json", json.dumps(result).encode())
         return result
 
-    def execute(self, value):
-        request = request_value(value)
+    def close(self):
+        for fd in reversed(self.fds):
+            os.close(fd)
+        self.fds.clear()
+
+    def record_refusal(self, error):
+        self.reason = reason_text(error)
+        if self.tx is not None:
+            # Best effort: the journal must never mask the refusal itself.
+            try:
+                create_file(self.tx, "refused.json", json.dumps({"reason": self.reason}).encode())
+            except Exception:
+                pass
+
+    def prepare_update(self, request, update_lock=None):
+        """Vet a normalized update request up to the exchange.
+
+        Files stay open: the caller publishes next, or closes on refusal.
+        Installs never arrive here; execute routes them straight on.
+        """
+        require(not request.get("install"), "Bulk updates cannot install plugins")
         try:
-            if request["install"]:
-                return self.install(request)
-            self.open_paths(request["id"])
+            self.open_paths(request["id"], update_lock=update_lock)
             self.local_metadata(request)
             if request["verified"]:
                 authorize(self.catalog_bytes(), request)
@@ -1619,12 +1679,29 @@ class Updater:
             target_tree = self.tree(stage, fetched)
             self.check_clean(stage, base_tree, request, "index-before")
             self.vet_stage(stage, fetched, request, target_tree)
-            if request["verified"]:
-                authorize(self.catalog_bytes(), request)
-            self.check_clean(stage, base_tree, request, "index-final")
             self.check_anchors()
             create_file(self.tx, "prepared.json", json.dumps({"original": identity(self.original),
-                        "replacement": identity(stage)}).encode())
+                            "replacement": identity(stage)}).encode())
+        except Exception as error:
+            self.record_refusal(error)
+            raise
+        return request, stage, base_tree
+
+    def authorize_update(self, prepared, catalog):
+        request, _, _ = prepared
+        if request["verified"]:
+            authorize(catalog, request)
+        self.authorized_update = prepared
+
+    def publish_update(self, prepared):
+        """Exchange a vetted request and report; the caller closes files."""
+        request, stage, base_tree = prepared
+        try:
+            self.check_anchors()
+            if getattr(self, "authorized_update", None) is not prepared:
+                self.authorize_update(prepared, self.catalog_bytes() if request["verified"] else None)
+            self.check_clean(stage, base_tree, request, "index-final")
+            self.check_anchors()
             self.checkpoint("before-exchange")
             # Signals only set a flag, so none can raise between the syscall and
             # published=True. No automatic rollback can overwrite a later edit.
@@ -1638,7 +1715,8 @@ class Updater:
             self.cancelled = False
             try:
                 self.checkpoint("after-exchange")
-                self.reload()
+                if not request.get("deferReload", False):
+                    self.reload()
             except Exception:
                 result["status"] = "updated; reload failed"
             create_file(self.tx, "result.json", json.dumps(result).encode())
@@ -1647,18 +1725,166 @@ class Updater:
             if self.published:
                 return ({"status": "installed; finalization failed"} if request["install"]
                         else {"status": "updated; finalization failed", "backup": self.backup})
-            self.reason = reason_text(error)
-            if self.tx is not None:
-                # Best effort: the journal must never mask the refusal itself.
-                try:
-                    create_file(self.tx, "refused.json", json.dumps({"reason": self.reason}).encode())
-                except Exception:
-                    pass
+            self.record_refusal(error)
             raise
+
+    def execute(self, value):
+        # Normalized bulk items re-enter here carrying the flag the bulk
+        # queue set after validation; strip it for validation, then restore
+        # it. Raw panel input never carries it (request_value refuses it).
+        deferred = value.get("deferReload", False)
+        require(type(deferred) is bool, "Invalid reload setting")
+        if "deferReload" in value:
+            value = {k: v for k, v in value.items() if k != "deferReload"}
+        request = request_value(value)
+        if deferred:
+            request["deferReload"] = True
+        if request["install"]:
+            try:
+                return self.install(request)
+            except Exception as error:
+                if self.published:
+                    return {"status": "installed; finalization failed"}
+                self.reason = reason_text(error)
+                if self.tx is not None:
+                    # Best effort: the journal must never mask the refusal itself.
+                    try:
+                        create_file(self.tx, "refused.json", json.dumps({"reason": self.reason}).encode())
+                    except Exception:
+                        pass
+                raise
+            finally:
+                self.close()
+        try:
+            prepared = self.prepare_update(request)
+        except Exception:
+            self.close()
+            raise
+        try:
+            return self.publish_update(prepared)
         finally:
-            for fd in reversed(self.fds):
-                os.close(fd)
-            self.fds.clear()
+            self.close()
+
+
+def execute_bulk_updates(requests, factory=Updater, stop=None):
+    staged = []
+    notifications = []
+    outcomes = {}
+    rescan = None
+    home = None
+    guard = None
+    owns_lock = False
+    nonce = "%d-%d" % (os.getpid(), time.monotonic_ns())
+
+    def halt(index, reason):
+        for later in range(index, len(requests)):
+            outcomes[later] = {"id": requests[later]["id"], "status": "unchanged; update refused",
+                               "reason": reason}
+
+    try:
+        try:
+            guard = factory()
+            home = guard.home
+            guard.open_update_lock()
+        except Exception as error:
+            halt(0, reason_text(error))
+            if guard is not None:
+                for index, request in enumerate(requests):
+                    notifications.append((guard, request, {"status": outcomes[index]["status"],
+                                                          "reason": outcomes[index]["reason"], "backup": ""}))
+        else:
+            owns_lock = True
+            for index, request in enumerate(requests):
+                if stop is not None and stop.get("cancelled"):
+                    halt(index, "Stopped: cancelled")
+                    break
+                updater = None
+                try:
+                    updater = factory()
+                    prepared = updater.prepare_update(request, guard.state)
+                except Exception as error:
+                    reason = (updater.reason or reason_text(error)) if updater is not None else reason_text(error)
+                    result = {"status": "unchanged; update refused", "reason": reason,
+                              "backup": updater.backup if updater is not None else ""}
+                    outcomes[index] = {"id": request["id"], "status": result["status"], "reason": reason}
+                    if updater is not None:
+                        updater.close()
+                        notifications.append((updater, request, result))
+                    if reason == CAPACITY_REASON:
+                        halt(index + 1, "Stopped: transaction limit")
+                        break
+                    continue
+                staged.append((index, request, prepared, updater))
+        catalog = None
+        catalog_error = None
+        if any(request["verified"] for _, request, _, _ in staged):
+            guard.deadline = time.monotonic() + UPDATE_RESULT_TIMEOUT
+            guard.cancelled = False
+            try:
+                catalog = guard.catalog_bytes()
+            except Exception as error:
+                catalog_error = error
+        authorization_errors = {}
+        for index, request, prepared, updater in staged:
+            try:
+                if request["verified"] and catalog_error is not None:
+                    raise catalog_error
+                updater.authorize_update(prepared, catalog)
+            except Exception as error:
+                authorization_errors[index] = error
+        for index, request, prepared, updater in staged:
+            updater.deadline = time.monotonic() + 10
+            updater.cancelled = False
+            try:
+                if index in authorization_errors:
+                    updater.record_refusal(authorization_errors[index])
+                    raise authorization_errors[index]
+                result = updater.publish_update(prepared)
+            except Exception as error:
+                result = {"status": "unchanged; update refused", "reason": updater.reason or reason_text(error),
+                          "backup": updater.backup}
+            finally:
+                updater.close()
+            notifications.append((updater, request, result))
+            outcomes[index] = {"id": request["id"], "status": result["status"],
+                               "reason": result.get("reason", "")}
+            if result["status"].startswith("updated"):
+                rescan = updater
+        results = [outcomes[index] for index in range(len(requests))]
+        rescan_result = "not needed"
+        if rescan is not None:
+            rescan_result = "failed"
+            for attempt in range(BULK_RESCAN_ATTEMPTS):
+                if attempt:
+                    time.sleep(BULK_RESCAN_PAUSE)
+                rescan.deadline = time.monotonic() + BULK_RESCAN_TIMEOUT
+                rescan.cancelled = False
+                try:
+                    rescan.reload()
+                except Exception:
+                    continue
+                rescan_result = "complete"
+                break
+        result = {"status": "bulk complete", "updates": results, "rescan": rescan_result, "nonce": nonce}
+        if home is not None and owns_lock:
+            try:
+                write_bulk_summary(home, result)
+            except Exception:
+                pass
+        for updater, request, notification in notifications:
+            try:
+                updater.notify(request, notification)
+            except Exception:
+                pass
+        return result
+    finally:
+        for _, _, _, updater in staged:
+            updater.close()
+        if guard is not None:
+            guard.close()
+
+def bulk_result_timeout(count):
+    return UPDATE_RESULT_TIMEOUT * count + BULK_RESCAN_ALLOWANCE
 
 
 def launch(request, factory=Updater):
@@ -1677,46 +1903,164 @@ def launch(request, factory=Updater):
             os.dup2(null, fd)
         os.close(null)
         signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-        updater = factory()
-        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            signal.signal(sig, lambda *_: setattr(updater, "cancelled", True))
+        if request_kind(request) == "bulk-update":
+            active = {"cancelled": False}
+
+            def handle_cancel(*_):
+                active["cancelled"] = True
+
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                signal.signal(sig, handle_cancel)
+            result = execute_bulk_updates(request["bulkUpdates"], factory, stop=active)
+        else:
+            updater = factory()
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                signal.signal(sig, lambda *_: setattr(updater, "cancelled", True))
+            try:
+                result = updater.execute(request)
+            except Exception as error:
+                reason = updater.reason or reason_text(error)
+                # A refused install replaced nothing, so it has no backup to name.
+                result = ({"status": "unchanged; install refused", "reason": reason}
+                          if request_kind(request) == "install"
+                          else {"status": "unchanged; update refused", "reason": reason,
+                                "backup": updater.backup})
+        output = memoryview(json.dumps(result).encode() + b"\n")
         try:
-            result = updater.execute(request)
-        except Exception as error:
-            reason = updater.reason or reason_text(error)
-            # A refused install replaced nothing, so it has no backup to name.
-            result = ({"status": "unchanged; install refused", "reason": reason}
-                      if request_kind(request) == "install"
-                      else {"status": "unchanged; update refused", "reason": reason,
-                            "backup": updater.backup})
-        try:
-            os.write(write_end, json.dumps(result).encode() + b"\n")
+            while output:
+                output = output[os.write(write_end, output):]
         except BrokenPipeError:
             pass
         os.close(write_end)
-        # Static, bounded notification text; no remote error prose reaches markup.
-        updater.notify(request, result)
+        if request_kind(request) != "bulk-update":
+            # Static, bounded notification text; no remote error prose reaches markup.
+            updater.notify(request, result)
         os._exit(0)
     os.close(write_end)
     os.waitpid(pid, 0)
     result = bytearray()
     with selectors.DefaultSelector() as poller:
         poller.register(read_end, selectors.EVENT_READ)
-        deadline = time.monotonic() + 140
+        is_bulk = request_kind(request) == "bulk-update"
+        count = len(request["bulkUpdates"]) if is_bulk else 1
+        deadline = time.monotonic() + (bulk_result_timeout(count) if is_bulk else UPDATE_RESULT_TIMEOUT)
         while time.monotonic() < deadline:
             if not poller.select(0.1):
                 continue
-            chunk = os.read(read_end, 4097 - len(result))
+            limit = MAX_BULK_RESULT if request_kind(request) == "bulk-update" else 4096
+            chunk = os.read(read_end, limit + 1 - len(result))
             if not chunk:
                 break
             result.extend(chunk)
-            require(len(result) <= 4096, "Worker result exceeds limit")
+            limit = MAX_BULK_RESULT if request_kind(request) == "bulk-update" else 4096
+            require(len(result) <= limit, "Worker result exceeds limit")
     os.close(read_end)
     if result:
         sys.stdout.buffer.write(result)
     else:
         print('{"status":"outcome unknown; inspect retained transactions","backup":""}')
     sys.stdout.flush()
+
+
+def _omarchy_dir(home):
+    """The config/omarchy directory descriptor, opened as open_paths does."""
+    worker = Updater(home=home)
+    root = worker.open_home()
+    try:
+        config = checked_dir(root, ".config")
+    except BaseException:
+        os.close(root)
+        raise
+    try:
+        return checked_dir(config, "omarchy")
+    finally:
+        os.close(config)
+        os.close(root)
+
+
+def write_bulk_summary(home, result):
+    """Record the bulk outcome where a reloaded panel finds it.
+
+    Outside the watched plugins tree and the counted updates dir, so the
+    write itself triggers no reload and consumes no capacity.
+    """
+    payload = json.dumps({"schemaVersion": 1, "nonce": result["nonce"], "status": "bulk complete",
+                          "updates": result["updates"], "rescan": result["rescan"]},
+                         ensure_ascii=True, allow_nan=False).encode()
+    omarchy = _omarchy_dir(home)
+    temporary = BULK_SUMMARY_NAME + "." + secrets.token_hex(12) + ".tmp"
+    try:
+        try:
+            info = os.stat(BULK_SUMMARY_NAME, dir_fd=omarchy, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                    and info.st_nlink == 1 and not info.st_mode & 0o077, "Unsafe summary file")
+        try:
+            create_file(omarchy, temporary, payload)
+        except FileExistsError:
+            raise
+        except BaseException:
+            try:
+                os.unlink(temporary, dir_fd=omarchy)
+            except OSError:
+                pass
+            raise
+        try:
+            os.rename(temporary, BULK_SUMMARY_NAME, src_dir_fd=omarchy, dst_dir_fd=omarchy)
+            os.fsync(omarchy)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=omarchy)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(omarchy)
+
+
+def consume_bulk_summary(home, nonce=None):
+    """Print and remove the recorded bulk outcome, or an empty object."""
+    if nonce is not None and NOREPLACE is None:
+        return {}
+    try:
+        omarchy = _omarchy_dir(home)
+    except (OSError, Refused):
+        return {}
+    claimed = BULK_SUMMARY_NAME + "." + secrets.token_hex(12) + ".claimed"
+    try:
+        try:
+            fcntl.flock(omarchy, fcntl.LOCK_EX)
+            os.rename(BULK_SUMMARY_NAME, claimed, src_dir_fd=omarchy, dst_dir_fd=omarchy)
+        except OSError:
+            return {}
+        try:
+            raw, info = read_file(omarchy, claimed, MAX_BULK_SUMMARY)
+            require(not info.st_mode & 0o077, "Unsafe summary file")
+            try:
+                document = json.loads(raw.decode("utf-8"))
+            except ValueError:
+                return {}
+            if (type(document) is dict and document.get("status") == "bulk complete"
+                    and type(document.get("updates")) is list):
+                if nonce is None:
+                    return document
+                if document.get("nonce") != nonce:
+                    NOREPLACE(omarchy, claimed.encode(), omarchy, BULK_SUMMARY_NAME.encode(), 1)
+            return {}
+        except (OSError, Refused):
+            return {}
+        finally:
+            try:
+                os.unlink(claimed, dir_fd=omarchy)
+            except OSError:
+                pass
+            try:
+                os.fsync(omarchy)
+            except OSError:
+                pass
+    finally:
+        os.close(omarchy)
 
 
 def serve_update_data_status():
@@ -1772,11 +2116,24 @@ if __name__ == "__main__":
         sys.exit(serve_cleanup_completed())
     if sys.argv[1:] == ["--update-data-status"]:
         sys.exit(serve_update_data_status())
+    if (sys.argv[1:] == ["--consume-bulk-summary"]
+            or len(sys.argv) == 3 and sys.argv[1] == "--drain-bulk-summary"):
+        # Always succeeds: an absent or unreadable summary reads as none.
+        try:
+            nonce = None
+            if sys.argv[1] == "--drain-bulk-summary":
+                require(len(sys.argv[2]) <= 64 and re.fullmatch(r"[0-9]+-[0-9]+", sys.argv[2]),
+                        "Invalid bulk summary nonce")
+                nonce = sys.argv[2]
+            print(json.dumps(consume_bulk_summary(Updater().home, nonce)))
+        except Exception:
+            print("{}")
+        sys.exit(0)
     kind = "update"
     try:
         os.umask(0o077)
-        require(len(sys.argv) == 2 and len(sys.argv[1]) <= 2048, "One bounded request required")
-        raw_request = document(sys.argv[1].encode(), 2048)
+        require(len(sys.argv) == 2 and len(sys.argv[1]) <= MAX_BULK_REQUEST, "One bounded request required")
+        raw_request = document(sys.argv[1].encode(), MAX_BULK_REQUEST)
         kind = request_kind(raw_request)
         if kind == "catalog":
             # In-process and streamed: the projection is far larger than the
@@ -1786,7 +2143,10 @@ if __name__ == "__main__":
             sys.stdout.buffer.write(Updater().serve_catalog(raw_request))
             sys.stdout.flush()
         else:
-            launch(request_value(raw_request))
+            require(kind == "bulk-update" or len(sys.argv[1].encode()) <= 2048,
+                    "One bounded request required")
+            request = bulk_request_value(raw_request) if kind == "bulk-update" else request_value(raw_request)
+            launch(request)
     except Exception as error:
         if kind == "catalog":
             print(reason_text(error), file=sys.stderr)

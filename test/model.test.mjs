@@ -36,6 +36,7 @@ const Model = new Function(
     tiledExpandedPanel, openAs, withOpenAs, expandedModeFromPayload, selfEntryFromShellConfig,
     updateBadge, updateCompareUrl,
     updateReleaseCandidates, versionLabel, countBehind,
+    bulkUpdateCandidates, bulkUpdateConfirmMessage, bulkUpdateSummary,
     trustedGithubReleaseApiUrl, trustedGithubReleaseUrl, trustedGithubRepoUrl, trustedGithubWebUrl,
     githubNavigationRequest, releaseProbeCommand,
     releaseNavigationInitialState, releaseNavigationRequestTransition,
@@ -94,6 +95,49 @@ test("pinned update eligibility binds raw repo, verified status, unique id and f
   assert.equal(pinned.applyPinnedUpdates(rows, null)[0].behind, false)
   assert.equal(pinned.applyPinnedUpdates(rows, null, true)[0].behind, true)
   assert.equal(pinned.applyPinnedUpdates(rows, null, "true")[0].behind, false, "strictly the boolean true")
+})
+
+test("bulk update candidates cover verified rows, opt-in tips, and nothing else", () => {
+  const verified = "b".repeat(40), head = "a".repeat(40), tip = "c".repeat(40)
+  const origin = "https://github.com/acme/plugin"
+  const base = { name: "Plugin", gitManaged: true, updatable: true, headSha: head,
+    updateOrigin: origin, remote: origin, localSha: head, remoteSha: tip,
+    updateChecked: true, ancestors: [head] }
+  const catalog = Model.catalogEntries({ plugins: [{ id: "acme.verified", repo: origin,
+    sourceType: "community", verificationStatus: "verified", verificationCommit: verified }] }, {})
+  const rows = Model.applyPinnedUpdates([
+    { ...base, id: "acme.verified" },
+    { ...base, id: "acme.tip" },
+    { ...base, id: "acme.ahead", ancestors: [head, verified], localSha: head, remoteSha: head },
+    { ...base, id: "acme.plain", updateOrigin: "https://example.com/acme/plain.git",
+      remote: "https://example.com/acme/plain.git" },
+  ], catalog, true)
+  const candidates = Model.bulkUpdateCandidates(rows)
+  assert.deepEqual(candidates.map(c => c.id), ["acme.verified", "acme.tip"])
+  assert.equal(candidates[0].kind, "verified")
+  assert.equal(candidates[0].targetSha, verified)
+  assert.equal(candidates[0].display, "Plugin — verified snapshot " + verified.slice(0, 7))
+  assert.equal(candidates[1].kind, "unverified")
+  assert.equal(candidates[1].targetSha, tip)
+  assert.equal(candidates[1].display, "Plugin — unreviewed commit " + tip.slice(0, 7))
+  // Verified-only default: the tip drops out, the snapshot stays.
+  assert.deepEqual(Model.bulkUpdateCandidates(Model.applyPinnedUpdates(rows, catalog)).map(c => c.id),
+    ["acme.verified"])
+  // The ahead row is superseded with nothing upstream, the plain one has no
+  // GitHub origin: neither is a candidate, but the plain one stays behind
+  // under existing semantics.
+  assert.equal(Model.countBehind(rows), 3)
+  // Confirm message names each plugin with its exact target.
+  const message = Model.bulkUpdateConfirmMessage(candidates)
+  assert.match(message, /Update 2 plugins to exactly these commits\?/)
+  assert.match(message, new RegExp("Plugin — verified snapshot " + verified.slice(0, 7)))
+  assert.match(message, new RegExp("Plugin — unreviewed commit " + tip.slice(0, 7)))
+  assert.equal(Model.bulkUpdateConfirmMessage([candidates[0]]).split("\n")[0], "Update 1 plugin to exactly these commits?")
+  // Summary counts updates and names every skip with its reason.
+  assert.equal(Model.bulkUpdateSummary([
+    { name: "A", ok: true }, { name: "B", ok: false, reason: "tip moved" },
+  ]), "Updated 1, skipped 1 (B: tip moved)")
+  assert.equal(Model.bulkUpdateSummary([{ name: "A", ok: true }]), "Updated 1, skipped 0")
 })
 
 function upstreamFixture(verified = "a".repeat(40)) {
@@ -225,7 +269,8 @@ test("catalog, installed load and branch report converge in all arrival orders",
   for (const order of ["CLR", "CRL", "LCR", "LRC", "RCL", "RLC"]) {
     const state = { rows: [], catalog: [], loading: false, loadError: "", loadRetried: false,
       pendingUpdateReport: "", checkingUpdates: false, rowsLoaded() {}, finishOpenLoad() {},
-      selfSettings: {}, allowUnverifiedUpdates: true }
+      selfSettings: {}, allowUnverifiedUpdates: true, busy: false, bulkActive: false,
+      consumeBulkSummary() { this.consumed = true } }
     const api = Function("Model", "state", `with (state) {
       ${qmlFunction(store, "applyLoad")}; ${qmlFunction(store, "applyUpdateReport")};
       return { applyLoad, applyUpdateReport }
@@ -239,6 +284,7 @@ test("catalog, installed load and branch report converge in all arrival orders",
       }
     }
     const projected = state.rows[0]
+    assert.equal(state.consumed, true, `a fresh load looks for a recorded summary: ${order}`)
     assert.equal(projected.remoteSha, tip, order)
     assert.equal(projected.verifiedTargetSha, head, order)
     assert.equal(projected.pinnedEligible, false, order)
@@ -1184,6 +1230,7 @@ test("the unreviewed-update confirmation installs exactly the commit it named, o
   const run = (row, sha, gate = true) => {
     const state = { busy: false, pendingKind: "update", pendingId: "thing", pendingLabel: "Thing", pendingUrl: "",
       pendingUnverifiedSha: sha, pendingPlacementNeeded: false, rows: row ? [row] : [], calls: [],
+      bulkActive: false, bulkQueue: [],
       runUpdate(target) { this.calls.push(target.id) }, runAction() { this.calls.push("action") },
       canStartUpdate: () => gate, startDisable() {}, startAdd() {} }
     Function("Model", "state", `with (state) { ${qmlFunction(store, "cancelPending")}; ${qmlFunction(store, "confirmPending")}; confirmPending() }`)(Model, state)
@@ -1200,6 +1247,267 @@ test("the unreviewed-update confirmation installs exactly the commit it named, o
   // The dialog offers the exact diff, and only for this kind of question.
   assert.match(store, /readonly property string confirmCompareUrl: pendingKind === "update"\s*\? Model\.updateCompareUrl\(Model\.findRow\(rows, pendingId\)\) : ""/)
   assert.match(store, /if \(pendingKind === "update"\)\s*return Model\.updateUnverifiedConfirmMessage\(pendingLabel, Model\.findRow\(rows, pendingId\)\)/)
+})
+
+test("bulk update confirms once and delegates every bound verified or unverified target", () => {
+  const store = readFileSync(new URL("../PluginStore.qml", import.meta.url), "utf8")
+  assert.match(store, /property var bulkQueue: \[\]/)
+  assert.match(store, /property var bulkResults: \[\]/)
+  assert.match(store, /property bool bulkActive: false/)
+  assert.match(store, /readonly property int bulkUpdatableCount: Model\.bulkUpdateCandidates\(rows\)\.length/)
+  assert.match(store, /if \(pendingKind === "bulk-update"\)\s*return Model\.bulkUpdateConfirmMessage\(bulkQueue\)/)
+  assert.match(store, /if \(!bulkActive\) bulkQueue = \[\]/)
+  for (const fn of ["bulkUpdatables()", "askBulkUpdate()", "startNextBulk()", "runBulkUpdates(requests)", "finishBulkProcess()", "finishBulk()"])
+    assert.match(store, new RegExp(`function ${fn.replace(/[()]/g, "\\$&").replace(/,/g, ",")} \\{`), fn)
+  // One bulk confirmation covers the unreviewed tips: no per-row dialog later.
+  assert.match(store, /if \(pendingKind === "bulk-update"\) \{[\s\S]*?var queue = bulkQueue\.slice\(\)/)
+  assert.match(store, /JSON\.stringify\(\{ schemaVersion: 1, bulkUpdates: requests \}\)/)
+  assert.match(store, /function finishBulkProcess\(\)[\s\S]*?outcomes\[update\.id\] = update/)
+  for (const [surface, expandId] of [["Panel.qml", "expandButton"], ["Expanded.qml", "collapseButton"]]) {
+    const source = readFileSync(new URL("../" + surface, import.meta.url), "utf8")
+    assert.match(source, /readonly property alias bulkUpdatableCount: store\.bulkUpdatableCount/, surface)
+    const button = source.slice(source.indexOf("id: updateAllButton"), source.indexOf("id: updateAllButton") + 700)
+    assert.match(button, /visible: !root\.browsing/, surface)
+    assert.match(button, /iconText: "󰑐"/, surface)
+    assert.match(button, /tooltipText: "Update all"/, surface)
+    assert.match(button, /enabled: root\.updateActionsEnabled/, surface)
+    assert.match(button, /opacity: root\.bulkUpdatableCount > 0 && enabled \? 1 : 0\.4/, surface)
+    assert.match(button, /onClicked: (root\.)?(askBulkUpdate\(\)|store\.askBulkUpdate\(\))/, surface)
+    assert.ok(source.indexOf(`id: ${expandId}`) < source.indexOf("id: updateAllButton"), surface)
+    assert.ok(source.indexOf("id: updateAllButton") < source.indexOf("id: refreshButton"), surface)
+    const expand = source.slice(source.indexOf(`id: ${expandId}`), source.indexOf(`id: ${expandId}`) + 500)
+    assert.match(expand, /anchors\.right: updateAllButton\.visible \? updateAllButton\.left : refreshButton\.left/, surface)
+  }
+
+  const model = Function(source + `; return { pinnedRequest, unverifiedRequest, findRow, shortSha,
+    bulkUpdateCandidates, bulkUpdateConfirmMessage, bulkUpdateSummary,
+    applyUpdateReport, applyPinnedUpdates }`)()
+  const target = "b".repeat(40), base = "a".repeat(40), tip = "c".repeat(40)
+  const origin = "https://github.com/acme/plugin"
+  const rows = () => ([
+    { id: "acme.verified", name: "Verified", headSha: base, remoteSha: base, verifiedTargetSha: target,
+      gitManaged: true, pinnedEligible: true, updateOrigin: origin },
+    { id: "acme.tip", name: "Tip", headSha: base, remoteSha: tip, verifiedTargetSha: "",
+      gitManaged: true, unverifiedEligible: true, updateOrigin: origin },
+  ])
+  const catalog = [{ id: "acme.verified",
+    updateSnapshot: { id: "acme.verified", repository: origin, verifiedCommit: target } }]
+  const begin = (overrides = {}) => {
+    const pinnedProc = { running: false }, actionProc = { running: false }, summaryProc = { running: false }
+    const state = { rows: rows(), catalog, catalogLoaded: true, busy: false,
+      busyKind: "", busyId: "", busyRowId: "", pinnedOutput: "", pinnedExited: false,
+      pinnedOverflow: false, pinnedHelperPath: "/helpers/pinned_update.py", allowUnverifiedUpdates: true,
+      pendingKind: "", pendingId: "", pendingLabel: "", pendingUrl: "", pendingUnverifiedSha: "",
+      pendingVerifiedCommit: "", pendingBranch: "", pendingSection: "", pendingPlacementNeeded: false,
+      pendingUpdateReport: "", bulkQueue: [], bulkResults: [], bulkPendingRequests: [], bulkActive: false, finished: [], detached: [],
+      summaryOutput: "", summaryOverflow: false, summaryDrainOnly: false, lastBulkSummaryNonce: "",
+      setStatus(text, isError) { this.status = { text, isError: isError === true } },
+      loadProcessSettled: () => true, updateProcessSettled: () => true,
+      requestFreshUpdateCycle() { this.freshCycle = true }, refreshUpdateData() { this.updateRefresh = true },
+      actionFinished(kind, label, code) { this.finished.push([kind, label, code]) },
+      ...overrides }
+    state.root = state
+    const names = ["updateRequest", "canStartUpdate", "bulkUpdatables", "askBulkUpdate",
+      "cancelPending", "confirmPending", "startNextBulk", "runBulkUpdates", "finishBulk",
+      "finishBulkProcess", "finishPinnedUpdate", "runUpdate", "consumeBulkSummary", "finishBulkSummary"]
+    Object.assign(state, Function("Model", "state", "pinnedProc", "actionProc", "summaryProc", "Quickshell", `with (state) {
+      ${names.map(name => qmlFunction(store, name)).join("\n")}; return {${names.join(",")}}
+    }`)(model, state, pinnedProc, actionProc, summaryProc, {
+      env: () => "", execDetached(command) { state.detached.push(command) }
+    }))
+    state.pinnedProc = pinnedProc
+    state.summaryProc = summaryProc
+    return state
+  }
+  const land = (state, result) => {
+    state.pinnedProc.running = false
+    state.pinnedOutput = JSON.stringify(result)
+    state.pinnedExited = true
+    state.finishPinnedUpdate()
+  }
+
+  const state = begin()
+  assert.equal(state.askBulkUpdate(), true)
+  assert.equal(state.pendingKind, "bulk-update")
+  assert.match(model.bulkUpdateConfirmMessage(state.bulkQueue), /Verified — verified snapshot bbbbbbb/)
+  assert.match(model.bulkUpdateConfirmMessage(state.bulkQueue), /Tip — unreviewed commit ccccccc/)
+  state.confirmPending()
+  assert.equal(state.bulkActive, true)
+  const batch = JSON.parse(state.pinnedProc.command.at(-1))
+  assert.deepEqual(batch.bulkUpdates.map(request => request.id), ["acme.verified", "acme.tip"])
+  assert.equal(batch.bulkUpdates[1].unverifiedCommit, tip,
+    "the setting allows the unverified target in the same confirmed batch")
+  assert.equal(state.busyKind, "bulk-update")
+  land(state, { status: "bulk complete", nonce: "1-1", updates: [
+    { id: "acme.verified", status: "updated", reason: "" },
+    { id: "acme.tip", status: "updated", reason: "" },
+  ] })
+  assert.equal(state.bulkActive, false)
+  assert.deepEqual(state.finished, [["bulk-update", "Update all", 0]])
+  assert.equal(state.status.text, "Updated 2, skipped 0")
+  assert.equal(state.status.isError, false)
+  assert.equal(state.detached.length, 0, "the detached helper owns the final shell rescan")
+  assert.equal(state.summaryProc.running, true, "the live panel consumes the updated summary")
+  assert.deepEqual(state.summaryProc.command.slice(-2), ["--drain-bulk-summary", "1-1"])
+  state.summaryOutput = JSON.stringify({ status: "bulk complete", nonce: "1-1",
+    updates: [{ id: "acme.verified", status: "updated" }], rescan: "complete" })
+  state.finishBulkSummary()
+  assert.equal(state.finished.length, 1, "the live result nonce suppresses summary replay")
+
+  const completedStatus = state.status
+  state.summaryOutput = JSON.stringify({ status: "bulk complete", nonce: "2-1",
+    updates: [{ id: "acme.verified", status: "unchanged; update refused",
+      reason: "Another pinned update is running" }], rescan: "not needed" })
+  state.finishBulkSummary()
+  assert.equal(state.status, completedStatus, "a live drain must not present another batch's report")
+  assert.equal(state.finished.length, 1)
+  assert.equal(state.lastBulkSummaryNonce, "1-1")
+  state.summaryProc.running = false
+  state.consumeBulkSummary()
+  assert.equal(state.summaryProc.command.at(-1), "--consume-bulk-summary")
+  state.summaryOutput = JSON.stringify({ status: "bulk complete", nonce: "3-1",
+    updates: [{ id: "acme.verified", status: "updated" }], rescan: "complete" })
+  state.finishBulkSummary()
+  assert.equal(state.finished.length, 2, "recovery still reports a legitimate unseen batch")
+  assert.equal(state.lastBulkSummaryNonce, "3-1")
+
+  // A moved tip skips with a reason instead of installing something else.
+  const moved = begin()
+  assert.equal(moved.askBulkUpdate(), true)
+  moved.rows[1].remoteSha = "d".repeat(40)
+  moved.confirmPending()
+  land(moved, { status: "bulk complete", updates: [
+    { id: "acme.verified", status: "updated", reason: "" },
+  ] })
+  assert.deepEqual(moved.bulkResults, [{ id: "acme.verified", name: "Verified", ok: true, reason: "" },
+    { id: "acme.tip", name: "Tip", ok: false, reason: "the upstream tip moved" }])
+  assert.equal(moved.status.text, "Updated 1, skipped 1 (Tip: the upstream tip moved)")
+  assert.equal(moved.detached.length, 0, "the helper owns the rescan even after local skips")
+
+  const uncertain = begin()
+  assert.equal(uncertain.askBulkUpdate(), true)
+  uncertain.rows[1].remoteSha = "d".repeat(40)
+  uncertain.confirmPending()
+  land(uncertain, { status: "outcome unknown; inspect retained transactions" })
+  assert.equal(uncertain.detached.length, 0)
+  assert.equal(uncertain.summaryProc.running, false, "an unknown outcome cannot claim another batch's summary")
+
+  const rescanFailure = begin()
+  assert.equal(rescanFailure.askBulkUpdate(), true)
+  rescanFailure.confirmPending()
+  land(rescanFailure, { status: "bulk complete", nonce: "1-2", rescan: "failed", updates: [
+    { id: "acme.verified", status: "updated", reason: "" },
+    { id: "acme.tip", status: "updated", reason: "" },
+  ] })
+  assert.equal(rescanFailure.status.text, "Updated 2, skipped 0; shell did not reload the updated plugins")
+  assert.equal(rescanFailure.status.isError, true)
+  assert.deepEqual(rescanFailure.finished, [["bulk-update", "Update all", 1]])
+  assert.equal(rescanFailure.rows[0].remoteSha, base, "a failed shell rescan keeps pending update evidence")
+  assert.equal(rescanFailure.freshCycle, undefined)
+  assert.equal(rescanFailure.updateRefresh, undefined)
+  assert.equal(rescanFailure.summaryProc.running, true, "a failed rescan still consumes the live summary")
+
+  const updateReloadFailure = begin()
+  updateReloadFailure.askBulkUpdate()
+  updateReloadFailure.confirmPending()
+  land(updateReloadFailure, { status: "bulk complete", updates: [
+    { id: "acme.verified", status: "updated; reload failed", reason: "Shell rescan refused" },
+    { id: "acme.tip", status: "updated", reason: "" },
+  ] })
+  assert.deepEqual(updateReloadFailure.bulkResults, [
+    { id: "acme.verified", name: "Verified", ok: true, reason: "" },
+    { id: "acme.tip", name: "Tip", ok: true, reason: "" },
+  ])
+  assert.equal(updateReloadFailure.status.text, "Updated 2, skipped 0")
+
+  const rejected = begin()
+  rejected.askBulkUpdate()
+  rejected.confirmPending()
+  land(rejected, { status: "unchanged; request refused", reason: "Invalid bulk update request" })
+  assert.equal(rejected.status.text,
+    "Updated 0, skipped 2 (Verified: Invalid bulk update request; Tip: Invalid bulk update request)")
+
+  const prototypeId = begin({ bulkQueue: [{ id: "toString", name: "Special", kind: "verified", targetSha: target }],
+    bulkPendingRequests: [{ id: "toString" }], bulkActive: true,
+    pinnedOutput: JSON.stringify({ status: "bulk complete", updates: [
+      { id: "toString", status: "updated", reason: "" },
+    ] }) })
+  prototypeId.finishBulkProcess()
+  assert.deepEqual(prototypeId.bulkResults, [{ id: "toString", name: "Special", ok: true, reason: "" }])
+
+  // A capacity refusal stops the run: the rest are skipped, not retried.
+  const limited = begin()
+  assert.equal(limited.askBulkUpdate(), true)
+  limited.confirmPending()
+  land(limited, { status: "bulk complete", nonce: "1-3", updates: [
+    { id: "acme.verified", status: "unchanged; update refused", reason: "Transaction limit: review x" },
+    { id: "acme.tip", status: "unchanged; update refused", reason: "Stopped: transaction limit" },
+  ] })
+  assert.equal(limited.bulkActive, false)
+  assert.equal(limited.status.text,
+    "Updated 0, skipped 2 (Verified: Transaction limit: review x; Tip: Stopped: transaction limit)")
+  assert.equal(limited.detached.length, 0, "a run with no successful changes does not rescan the shell")
+  assert.equal(limited.summaryProc.running, true, "an all-refused live batch consumes its summary")
+})
+
+test("bulk progress stays visible while either surface is busy", () => {
+  for (const surface of ["Panel.qml", "Expanded.qml"]) {
+    const qml = readFileSync(new URL("../" + surface, import.meta.url), "utf8")
+    const start = qml.lastIndexOf("text: {", qml.indexOf("if (root.settingsOpen) return root.statusSource"))
+    const end = qml.indexOf("\n", qml.indexOf("return root.status", qml.indexOf("if (root.busy)", start)))
+    const body = qml.slice(start + "text: {".length, end)
+    const status = "Updating 2 plugins; stopping finishes preparation; checked updates still apply; closing this window does not cancel it"
+    const root = { busy: true, busyKind: "bulk-update", busyId: "Update all", status }
+    assert.equal(Function("root", "Model", body)(root, Model), status, surface)
+  }
+})
+
+test("a reloaded store reports a recorded bulk summary once, then never again", () => {
+  const store = readFileSync(new URL("../PluginStore.qml", import.meta.url), "utf8")
+  assert.match(store, /id: summaryProc/)
+  assert.match(store, /\["--consume-bulk-summary"\]/)
+  assert.match(store, /if \(!busy && !bulkActive\) consumeBulkSummary\(\)/)
+  const target = "b".repeat(40), base = "a".repeat(40)
+  const model = Function(source + "; return { findRow, bulkUpdateSummary, applyUpdateReport, applyPinnedUpdates, parseUpdateReport }")()
+  const state = { rows: [{ id: "acme.plugin", name: "Plugin" }], busy: false, bulkActive: false,
+    bulkQueue: [], bulkPendingRequests: [], bulkResults: [], pinnedOutput: "", pinnedOverflow: false,
+    bulkRescanFailed: false, lastBulkSummaryNonce: "", summaryOutput: "", summaryOverflow: false,
+    summaryDrainOnly: false,
+    pendingUpdateReport: "", allowUnverifiedUpdates: false, catalog: [],
+    setStatus(text, isError) { this.status = { text, isError: isError === true } },
+    requestFreshUpdateCycle() { this.freshCycle = true }, refreshUpdateData() { this.updateRefresh = true },
+    actionFinished(kind, label, code) { (this.finished = this.finished || []).push([kind, label, code]) },
+    applyUpdateReport: (rows) => rows, applyPinnedUpdates: (rows) => rows }
+  state.root = state
+  Object.assign(state, Function("Model", "state", `with (state) {
+    ${qmlFunction(store, "finishBulkSummary")};
+    ${qmlFunction(store, "finishBulkProcess")};
+    ${qmlFunction(store, "finishBulk")}; return {finishBulkSummary, finishBulkProcess, finishBulk}
+  }`)(model, state))
+  const payload = JSON.stringify({ status: "bulk complete", nonce: "7-9",
+    updates: [{ id: "acme.plugin", status: "updated", reason: "" }], rescan: "complete" })
+  state.summaryOutput = payload
+  state.finishBulkSummary()
+  assert.equal(state.status.text, "Updated 1, skipped 0")
+  assert.equal(state.freshCycle, true)
+  assert.equal(state.lastBulkSummaryNonce, "7-9")
+  state.status = null
+  state.freshCycle = false
+  state.summaryOutput = payload
+  state.finishBulkSummary()
+  assert.equal(state.status, null, "the same batch is not announced twice")
+  assert.equal(state.freshCycle, false)
+  state.summaryOutput = payload
+  state.busy = true
+  state.finishBulkSummary()
+  assert.equal(state.status, null, "a summary never retires an action still running")
+})
+
+test("the u key asks for a bulk update on the Installed tab of both surfaces", () => {
+  const panel = readFileSync(new URL("../Panel.qml", import.meta.url), "utf8")
+  assert.match(panel, /else if \(\(t === "u" \|\| t === "U"\) && !root\.browsing\) root\.askBulkUpdate\(\)/)
+  const expanded = readFileSync(new URL("../Expanded.qml", import.meta.url), "utf8")
+  assert.match(expanded, /else if \(\(text === "u" \|\| text === "U"\) && !root\.browsing\) \{ store\.askBulkUpdate\(\); event\.accepted = true \}/)
 })
 
 test("both update entry points require the displayed tuple and settled processes", () => {
@@ -3252,16 +3560,28 @@ test("installedFilterHints mirrors the Browse row for Source, Kind, and Status",
   assert.equal(Model.installedFilterHints({}, options)[0].text, "SOURCE")
 })
 
-test("actionHints lists the row actions of each tab in the same hint shape", () => {
+test("actionHints puts Update All first and lights it only when a bulk update is available", () => {
   assert.deepEqual(Model.actionHints(true), [
     { key: "↵", text: "DETAILS", active: false },
     { key: "/", text: "SEARCH", active: false }
   ])
-  assert.deepEqual(Model.actionHints(false), [
+  assert.deepEqual(Model.actionHints(false, false), [
+    { key: "u", text: "UPDATE ALL", active: false },
     { key: "↵", text: "UPDATE", active: false },
     { key: "⌦", text: "REMOVE", active: false },
     { key: "/", text: "SEARCH", active: false }
   ])
+  assert.deepEqual(Model.actionHints(false, true), [
+    { key: "u", text: "UPDATE ALL", active: true },
+    { key: "↵", text: "UPDATE", active: false },
+    { key: "⌦", text: "REMOVE", active: false },
+    { key: "/", text: "SEARCH", active: false }
+  ])
+
+  const panel = readFileSync(new URL("../Panel.qml", import.meta.url), "utf8")
+  assert.match(panel, /model: Model\.actionHints\(root\.browsing, root\.bulkUpdatableCount > 0\)/)
+  const expanded = readFileSync(new URL("../Expanded.qml", import.meta.url), "utf8")
+  assert.match(expanded, /Model\.actionHints\(root\.browsing, root\.bulkUpdatableCount > 0\)/)
 })
 
 test("verifiedIdSet joins installed rows to the marketplace's verified listings by id", () => {
@@ -3311,16 +3631,19 @@ test("the header refresh button is display-sized and spins instead of greying wh
   const panel = readFileSync(new URL("../Panel.qml", import.meta.url), "utf8")
   assert.match(panel, /readonly property bool refreshing: browsing \? catalogLoading : \(loading \|\| checkingUpdates\)/)
 
-  const button = panel.slice(panel.indexOf("id: refreshButton"), panel.indexOf("PanelSeparator {", panel.indexOf("id: refreshButton")))
+  const button = panel.slice(panel.indexOf("id: refreshButton"), panel.indexOf("id: refreshSpinner"))
   assert.match(button, /fontSize: Style\.font\.display/)
   // The button's own glyph steps aside while refreshing; the spinner takes its place.
-  assert.match(button, /iconText: root\.refreshing \? "" : "󰑐"/)
+  assert.match(button, /iconText: root\.refreshing \? "" : "󰉹"/)
   assert.doesNotMatch(button, /opacity: enabled \? 1 : 0\.4/)
   assert.match(button, /opacity: root\.busy \? 0\.4 : 1/)
 
-  const spinner = button.slice(button.indexOf("id: refreshSpinner"))
+  const spinner = panel.slice(panel.indexOf("id: refreshSpinner"), panel.indexOf("id: refreshSpinner") + 800)
   assert.match(spinner, /visible: root\.refreshing/)
-  assert.match(spinner, /text: "󰑐"/)
+  assert.match(spinner, /text: "󰑓"/)
+  // The header re-read glyph is a list mark, distinct from the per-row update
+  // arrow; the small badge overlays it at reduced size and hides while refreshing.
+  assert.match(button, /visible: !root\.refreshing[\s\S]*?text: "󰑐"[\s\S]*?Math\.round\(refreshButton\.fontSize \* 0\.55\)/)
   assert.match(spinner, /textFormat: Text\.PlainText/)
   assert.match(spinner, /RotationAnimation on rotation \{[\s\S]*?running: root\.refreshing[\s\S]*?from: 0[\s\S]*?to: 360[\s\S]*?direction: RotationAnimation\.Clockwise[\s\S]*?loops: Animation\.Infinite/)
 })
@@ -3504,7 +3827,7 @@ test("one hint bar on both tabs: filter hints left, action hints right, keys cyc
   assert.match(bar, /id: filterHints\s+anchors\.left: parent\.left/)
   assert.match(bar, /id: actionHints\s+anchors\.right: parent\.right/)
   assert.match(bar, /model: root\.browsing \? root\.browseFilterHints : root\.installedFilterHints/)
-  assert.match(bar, /model: Model\.actionHints\(root\.browsing\)/)
+  assert.match(bar, /model: Model\.actionHints\(root\.browsing, root\.bulkUpdatableCount > 0\)/)
   // One delegate for both groups, keys shown uppercase in the accent.
   assert.equal(bar.split("delegate: hintDelegate").length - 1, 2)
   assert.match(bar, /text: "\[" \+ hint\.modelData\.key\.toUpperCase\(\) \+ "\]"\s+color: Color\.accent/)
@@ -3775,7 +4098,7 @@ test("installing runs the pinned helper on the verified commit, never the host a
   for (const status of ["installed", "installed; reload failed", "installed; enable failed",
     "installed; finalization failed", "unchanged; install refused", "unchanged; request refused"])
     assert.ok(store.includes(`"${status}"`), status)
-  assert.match(store, /if \(!pinnedExited \|\| \(busyKind !== "update" && busyKind !== "install"\)\) return/)
+  assert.match(store, /if \(!pinnedExited\) return\s+if \(busyKind === "bulk-update"\) \{\s*var nonce = finishBulkProcess\(\)/)
   // A re-derived request is what actually runs: the dialog's answer is bound
   // to the snapshot the live catalog still names.
   assert.match(store, /function startAdd\(section\) \{[\s\S]*?String\(request\.verifiedCommit \|\| ""\) !== commit[\s\S]*?launchInstall\(request, label\)/)
@@ -3788,6 +4111,7 @@ test("an unreviewed install is confirmed and re-gated on the branch the dialog n
   const base = () => ({ busy: false, pendingKind: "", pendingId: "", pendingLabel: "", pendingUrl: "",
     pendingBranch: "", pendingVerifiedCommit: "", pendingSection: "", pendingPlacement: "",
     pendingPlacementNeeded: false, pendingUnverifiedSha: "", allowUnverifiedInstalls: true,
+    bulkActive: false, bulkQueue: [],
     catalog: catalog, launched: [], statuses: [],
     launchInstall(request, label) { this.launched.push([request, label]) },
     setStatus(text, error) { this.statuses.push([text, error]) } })
@@ -4201,7 +4525,7 @@ test("the expanded panel carries the Installed filters, their keys, and the hint
   assert.match(hints, /id: filterHints[\s\S]*?model: root\.browsing && root\.detailsOpen \? \[\] : \(root\.browsing \? root\.browseFilterHints : root\.installedFilterHints\)/)
   // The tab keys lead the right-hand group, with the current tab lit, so
   // the bar also says where you are.
-  assert.match(hints, /id: actionHints[\s\S]*?model: \[\s*\{ key: "1", text: "INSTALLED", active: !root\.browsing \},\s*\{ key: "2", text: "BROWSE", active: root\.browsing \}\s*\]\.concat\(root\.browsing && root\.detailsOpen\s*\? \[\{ key: "backspace", text: "BACK", active: false \}\]\s*: Model\.actionHints\(root\.browsing\)\.concat\(\[\{ key: "esc", text: "CLOSE", active: false \}\]\)\)/)
+  assert.match(hints, /id: actionHints[\s\S]*?model: \[\s*\{ key: "1", text: "INSTALLED", active: !root\.browsing \},\s*\{ key: "2", text: "BROWSE", active: root\.browsing \}\s*\]\.concat\(root\.browsing && root\.detailsOpen\s*\? \[\{ key: "backspace", text: "BACK", active: false \}\]\s*: Model\.actionHints\(root\.browsing, root\.bulkUpdatableCount > 0\)\.concat\(\[\{ key: "esc", text: "CLOSE", active: false \}\]\)\)/)
   assert.match(hints, /color: hint\.modelData\.active \? root\.foreground : root\.secondaryForeground/)
 })
 
@@ -4838,15 +5162,30 @@ test("installing from the details page keeps the page open", () => {
 
 test("the popup subtitle sits on its own full-width row under the title", () => {
   const panel = readFileSync(new URL("../Panel.qml", import.meta.url), "utf8")
-  const sub = panel.slice(panel.indexOf("id: subtitle"), panel.indexOf("id: subtitle") + 400)
-  assert.match(sub, /x: title\.x/)
-  assert.match(sub, /width: parent\.width - x/)
+  const rowStart = panel.lastIndexOf("Item {", panel.indexOf("id: subtitle"))
+  const rowEnd = panel.indexOf("PanelSeparator { foreground: root.contentForeground }", rowStart)
+  const row = panel.slice(rowStart, rowEnd)
+  assert.match(row, /x: title\.x/)
+  assert.match(row, /width: parent\.width - x/)
+  assert.match(row, /height: subtitle\.implicitHeight/)
+  const sub = panel.slice(panel.indexOf("id: subtitle"), panel.indexOf("id: subtitle") + 700)
   assert.match(sub, /visible: text !== ""/)
   assert.doesNotMatch(sub, /anchors\.baseline: title\.baseline/)
-  assert.doesNotMatch(sub, /anchors\.right: /)
+  assert.match(sub, /anchors\.right: parent\.right/)
+  assert.doesNotMatch(row, /Update all \(/)
+  assert.match(panel, /function askBulkUpdate\(\) \{\s*if \(!store\.askBulkUpdate\(\)\) return\s*revokeReleaseNavigation\(\)\s*\}/)
   assert.match(panel, /var summary = root\.installedTotal \+ " installed · " \+ root\.rows\.length \+ " total"/)
   assert.match(panel, /return summary \+ " · " \+ root\.behindCount \+ " to update"/)
   assert.doesNotMatch(panel, /"  ·  "/)
+})
+
+test("the expanded summary elides before the tab cluster instead of running under it", () => {
+  const expanded = readFileSync(new URL("../Expanded.qml", import.meta.url), "utf8")
+  const summaryStart = expanded.indexOf('return summary + "  ·  " + root.behindCount + " to update"')
+  const blockStart = expanded.lastIndexOf("Text {", summaryStart)
+  const block = expanded.slice(blockStart, summaryStart + 100)
+  assert.match(block, /anchors\.right: root\.browsing \? marketplaceLink\.left : tabs\.left/)
+  assert.match(block, /elide: Text\.ElideRight/)
 })
 
 test("the manifest registers the expanded window as a panel kind", () => {

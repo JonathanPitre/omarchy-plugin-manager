@@ -220,6 +220,7 @@ Item {
   property alias loadError: store.loadError
   property alias checkingUpdates: store.checkingUpdates
   readonly property alias behindCount: store.behindCount
+  readonly property alias bulkUpdatableCount: store.bulkUpdatableCount
   readonly property alias updateActionsEnabled: store.updateActionsEnabled
   readonly property alias installedTotal: store.installedTotal
   property alias catalog: store.catalog
@@ -804,6 +805,7 @@ Item {
         else if ((text === "f" || text === "F")) root.browsing ? root.cycleCatalogKindFilter() : root.cycleKindFilter()
         else if ((text === "s" || text === "S")) root.browsing ? root.cycleCatalogSort() : root.cycleGroupFilter()
         else if ((text === "t" || text === "T") && !root.browsing) root.cycleStatusFilter()
+        else if ((text === "u" || text === "U") && !root.browsing) { store.askBulkUpdate(); event.accepted = true }
         else if ((text === "c" || text === "C") && root.browsing) root.cycleCategoryFilter()
         else if ((text === "a" || text === "A") && root.browsing) root.cycleAvailabilityFilter()
         else if (text === "/") { searchField.forceActiveFocus(); event.accepted = true }
@@ -814,7 +816,6 @@ Item {
         }
       }
 
-      // ---- Header: what this is, the tabs, and the two icons.
       Item {
         id: header
         anchors.left: parent.left
@@ -926,7 +927,10 @@ Item {
           textFormat: Text.PlainText
           anchors.left: title.right
           anchors.leftMargin: Style.space(10)
+          anchors.right: root.browsing ? marketplaceLink.left : tabs.left
+          anchors.rightMargin: Style.space(10)
           anchors.baseline: title.baseline
+          elide: Text.ElideRight
           text: {
             if (root.browsing) {
               if (root.catalogLoading && root.catalog.length === 0) return "fetching catalog…"
@@ -1040,7 +1044,7 @@ Item {
           id: collapseButton
           enabled: !root.barMovePending && !root.busy
           opacity: enabled ? 1 : 0.4
-          anchors.right: refreshButton.left
+          anchors.right: updateAllButton.visible ? updateAllButton.left : refreshButton.left
           anchors.rightMargin: Style.space(6)
           anchors.verticalCenter: parent.verticalCenter
           iconText: "󰊔"
@@ -1052,12 +1056,28 @@ Item {
         }
 
         PanelActionButton {
+          id: updateAllButton
+          anchors.right: refreshButton.left
+          anchors.rightMargin: Style.space(6)
+          anchors.verticalCenter: parent.verticalCenter
+          visible: !root.browsing
+          iconText: "󰑐"
+          fontSize: Style.font.display
+          tooltipText: "Update all"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          enabled: root.updateActionsEnabled && !root.barMovePending
+          opacity: root.bulkUpdatableCount > 0 && enabled ? 1 : 0.4
+          onClicked: store.askBulkUpdate()
+        }
+
+        PanelActionButton {
           id: refreshButton
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
-          iconText: root.refreshing ? "" : "󰑐"
+          iconText: root.refreshing ? "" : "󰉹"
           fontSize: Style.font.display
-          tooltipText: root.browsing ? "Re-fetch the catalog" : "Re-read the plugin list"
+          tooltipText: root.browsing ? "Re-fetch the catalog" : "Refresh plugin list"
           foreground: root.foreground
           fontFamily: root.fontFamily
           enabled: !root.loading && !root.catalogLoading && !root.busy
@@ -1069,12 +1089,25 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.rightMargin: Style.space(2)
+            anchors.bottomMargin: Style.space(2)
+            visible: !root.refreshing
+            text: "󰑐"
+            color: refreshButton.foreground
+            font.family: refreshButton.fontFamily
+            font.pixelSize: Math.round(refreshButton.fontSize * 0.55)
+          }
+
+          Text {
             id: refreshSpinner
             // Never rich text: AutoText would fetch what a crafted string points at.
             textFormat: Text.PlainText
             anchors.centerIn: parent
             visible: root.refreshing
-            text: "󰑐"
+            text: "󰑓"
             color: refreshButton.foreground
             font.family: refreshButton.fontFamily
             font.pixelSize: refreshButton.fontSize
@@ -1303,7 +1336,8 @@ Item {
           if (root.barMovePending) return root.arrangeOpen || root.statusSource !== "layout" ? root.status : ""
           if (root.arrangeOpen) return root.barSnapshot ? root.status
             : "Bar layout unavailable; waiting for host configuration."
-          if (root.busy) return Model.actionGerund(root.busyKind) + " " + root.busyId + "…"
+          if (root.busy) return root.busyKind === "bulk-update" ? root.status
+            : Model.actionGerund(root.busyKind) + " " + root.busyId + "…"
           if (root.browsing && root.catalogError !== "") return root.catalogError
           if (!root.browsing && root.loadError !== "") return root.loadError
           return root.statusSource === "layout" ? "" : root.status
@@ -1356,7 +1390,7 @@ Item {
                 { key: "2", text: "BROWSE", active: root.browsing }
               ].concat(root.browsing && root.detailsOpen
                 ? [{ key: "backspace", text: "BACK", active: false }]
-                : Model.actionHints(root.browsing).concat([{ key: "esc", text: "CLOSE", active: false }]))
+                : Model.actionHints(root.browsing, root.bulkUpdatableCount > 0).concat([{ key: "esc", text: "CLOSE", active: false }]))
               delegate: hintDelegate
             }
           }

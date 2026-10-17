@@ -1034,6 +1034,7 @@ function barSectionMovePlan(row, raw, section) {
 function actionVerb(kind) {
   if (kind === "install") return "Install"
   if (kind === "update") return "Update"
+  if (kind === "bulk-update") return "Update"
   if (kind === "remove") return "Remove"
   if (kind === "enable") return "Enable"
   if (kind === "disable") return "Disable"
@@ -1603,12 +1604,13 @@ function installedFilterHints(filters, options) {
 // The other end of the same bar: what Enter, Delete, and / do on this tab.
 // Refresh and the tab switch have buttons in the header and Escape closes
 // every panel, so none of those earn a column here.
-function actionHints(browsing) {
+function actionHints(browsing, bulkUpdateAvailable) {
   if (browsing) return [
     { key: "↵", text: "DETAILS", active: false },
     { key: "/", text: "SEARCH", active: false }
   ]
   return [
+    { key: "u", text: "UPDATE ALL", active: bulkUpdateAvailable === true },
     { key: "↵", text: "UPDATE", active: false },
     { key: "⌦", text: "REMOVE", active: false },
     { key: "/", text: "SEARCH", active: false }
@@ -2696,6 +2698,58 @@ function countBehind(rows) {
   for (var i = 0; i < (rows || []).length; i++)
     if (rows[i] && rows[i].behind === true) total++
   return total
+}
+
+// ---- Bulk update ----------------------------------------------------------
+//
+// The rows one "Update all" would install, in list order. Only rows with an
+// installable request: a verified snapshot when one differs, otherwise the
+// observed unreviewed tip when the setting allows it. Ahead-of-verified and
+// non-GitHub origins are excluded here; they stay counted by countBehind.
+function bulkUpdateCandidates(rows) {
+  var out = []
+  for (var i = 0; i < (rows || []).length; i++) {
+    var row = rows[i]
+    if (!row || String(row.id || "") === "") continue
+    var name = plainText(row.name || row.id)
+    if (row.pinnedEligible === true) {
+      var verified = normalizeGitObjectId(row.verifiedTargetSha)
+      if (!/^[0-9a-f]{40}$/.test(verified)) continue
+      out.push({ id: String(row.id), name: name, kind: "verified", targetSha: verified,
+        display: name + " — verified snapshot " + shortSha(verified) })
+    } else if (row.unverifiedEligible === true) {
+      var tip = normalizeGitObjectId(row.remoteSha)
+      if (!/^[0-9a-f]{40}$/.test(tip)) continue
+      out.push({ id: String(row.id), name: name, kind: "unverified", targetSha: tip,
+        display: name + " — unreviewed commit " + shortSha(tip) })
+    }
+  }
+  return out
+}
+
+// One line per candidate, in list order. Plain text only; names are already
+// sanitized by bulkUpdateCandidates.
+function bulkUpdateConfirmMessage(candidates) {
+  var list = candidates || []
+  var lines = []
+  for (var i = 0; i < list.length; i++) lines.push(String(list[i].display || ""))
+  return "Update " + list.length + (list.length === 1 ? " plugin" : " plugins")
+    + " to exactly these commits?\n\n" + lines.join("\n") + "\n\n"
+    + "Verified snapshots are rechecked before publication. "
+    + "Unreviewed commits install exactly as listed, nothing newer."
+}
+
+// "Updated x, skipped y (name: reason; …)". Names and reasons are already
+// plain text when the store builds them.
+function bulkUpdateSummary(results) {
+  var updated = 0
+  var skipped = []
+  for (var i = 0; i < (results || []).length; i++) {
+    if (results[i] && results[i].ok === true) updated++
+    else if (results[i]) skipped.push(String(results[i].name || "") + ": " + String(results[i].reason || "skipped"))
+  }
+  var summary = "Updated " + updated + ", skipped " + skipped.length
+  return skipped.length > 0 ? summary + " (" + skipped.join("; ") + ")" : summary
 }
 
 // ---- Update data: fixed helper protocol, never a source of commands --------
