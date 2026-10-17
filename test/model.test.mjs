@@ -16,7 +16,7 @@ const Model = new Function(
     rowsInGroup, groupLabel, sectionHeading,
     kindLabel, kindsLabel, kindOptions, filterByKind, nextKind, filterKind, filterKindLabel,
     statusOptions, filterByStatus,
-    matchesQuery, filterRows, isFiltering, emptyMessage, groupOptions, browseFilterHints, installedFilterHints, actionHints, nextOption, verifiedIdSet, isVerified, upToDate, catalogStarsById, rowStarLabel,
+    matchesQuery, filterRows, isFiltering, emptyMessage, groupOptions, browseFilterHints, installedFilterHints, actionHints, nextOption, verifiedIdSet, isVerified, upToDate, catalogStarsById, rowStarLabel, catalogHeartsById, rowHeartLabel,
     parseCatalog, catalogEntries, installedIdSet, installUrlFor, markInstalled,
     restampCatalogInstallState, plainText, buildCatalog, idSetFromList,
     catalogAssetUrl, catalogCount,
@@ -2128,6 +2128,25 @@ test("catalogStarsById joins GitHub stars onto installed rows by id", () => {
   assert.equal(Model.rowStarLabel({ id: "acme.weather" }, null), "")
   assert.equal(Model.rowStarLabel({ id: "x" }, Model.catalogStarsById([{ id: "x", stars: null }])), "")
   assert.equal(Model.rowStarLabel({ id: "y" }, Model.catalogStarsById([{ id: "y", stars: 1966 }])), "2k")
+})
+
+test("catalogHeartsById joins Marketplace hearts onto installed rows by id", () => {
+  const entries = Model.catalogEntries(catalogDoc, {})
+  const hearts = Model.catalogHeartsById(entries)
+  // Null prototype, like catalogStarsById: an id named `constructor` is data.
+  assert.equal(Object.getPrototypeOf(hearts), null)
+  assert.equal(hearts["acme.weather"], 7)
+  assert.equal(Model.rowHeartLabel({ id: "acme.weather" }, hearts), "7")
+  assert.equal(Model.rowHeartLabel({ id: "nobody.home" }, hearts), "")
+  assert.equal(Model.rowHeartLabel(null, hearts), "")
+  assert.equal(Model.rowHeartLabel({ id: "acme.weather" }, null), "")
+  assert.equal(Model.rowHeartLabel({ id: "constructor" }, hearts), "")
+  // Unknown stays unknown; a real zero is a count and may show.
+  assert.equal(Model.rowHeartLabel({ id: "x" }, Model.catalogHeartsById([{ id: "x", marketplaceHearts: null }])), "")
+  assert.equal(Model.rowHeartLabel({ id: "z" }, Model.catalogHeartsById([{ id: "z", marketplaceHearts: 0 }])), "0")
+  assert.equal(Model.rowHeartLabel({ id: "y" }, Model.catalogHeartsById([{ id: "y", marketplaceHearts: 1966 }])), "2k")
+  // Stars and hearts are separate maps.
+  assert.equal(Model.rowHeartLabel({ id: "s" }, Model.catalogHeartsById([{ id: "s", stars: 5 }])), "")
 })
 
 test("installedPreviewCandidates prefers the checkout's own preview, then the listing's", () => {
@@ -4628,7 +4647,7 @@ test("the expanded list row carries no actions or metadata lines", () => {
   assert.match(row, /readonly property real pillsWidth: \(stateMark\.visible \? stateMark\.width \+ marks\.spacing : 0\)/)
   assert.match(row, /text: Model\.descriptionLine\(root\.row\)[\s\S]*?wrapMode: Text\.WordWrap[\s\S]*?maximumLineCount: 2[\s\S]*?elide: Text\.ElideRight/)
   // The name yields to both pills instead of pushing them off the row.
-  assert.match(row, /id: name[\s\S]*?width: Math\.min\(implicitWidth, nameLine\.width - nameLine\.pillsWidth - nameLine\.starsWidth\)/)
+  assert.match(row, /id: name[\s\S]*?width: Math\.min\(implicitWidth, nameLine\.width - nameLine\.pillsWidth - nameLine\.countsWidth\)/)
 })
 
 test("the expanded panel plays the same puzzle-piece intro as the popup", () => {
@@ -4778,8 +4797,12 @@ test("the expanded list row marks updatable plugins and shows their stars", () =
   assert.match(store, /readonly property var starsById: Model\.catalogStarsById\(catalog\)/)
   assert.match(expanded, /readonly property alias starsById: store\.starsById/)
   assert.equal(expanded.split("stars: Model.rowStarLabel(modelData, root.starsById)").length - 1, 2)
+  assert.match(store, /readonly property var heartsById: Model\.catalogHeartsById\(catalog\)/)
+  assert.match(expanded, /readonly property alias heartsById: store\.heartsById/)
+  assert.equal(expanded.split("hearts: Model.rowHeartLabel(modelData, root.heartsById)").length - 1, 2)
 
   assert.match(row, /property string stars: ""/)
+  assert.match(row, /property string hearts: ""/)
   // A state mark leads the name, as in a package list: a bold arrow when an
   // update is waiting (green for a verified snapshot, orange for an
   // unreviewed upstream change), a green check when the checkout is
@@ -4801,14 +4824,31 @@ test("the expanded list row marks updatable plugins and shows their stars", () =
   assert.match(mark, /font\.pixelSize: Style\.font\.title/)
   assert.match(mark, /textFormat: Text\.PlainText/)
   assert.doesNotMatch(row, /id: updateArrow/)
-  // Stars sit at the row's right edge, the same gold star the cards use.
-  const stars = row.slice(row.indexOf("id: starsRow"), row.indexOf("id: starsRow") + 900)
-  assert.match(stars, /anchors\.right: parent\.right/)
+  // Stars, then hearts, sit at the row's right edge: the same gold star and
+  // red heart the cards use, each shown only when its count is known.
+  const counts = row.slice(row.indexOf("id: countsRow"), row.indexOf("id: countsRow") + 300)
+  assert.match(counts, /anchors\.right: parent\.right/)
+  // The container keys off the counts, never its children's visibility: a
+  // child's `visible` reads false while its parent is hidden, so a container
+  // that starts hidden (catalog not loaded yet) would never come back.
+  assert.match(counts, /visible: root\.stars !== "" \|\| root\.hearts !== ""/)
+  assert.doesNotMatch(counts, /visible: [^\n]*(starsRow|heartsRow)\.visible/)
+  assert.ok(row.indexOf("id: countsRow") < row.indexOf("id: starsRow"), "the stars sit inside the counts row")
+  assert.ok(row.indexOf("id: starsRow") < row.indexOf("id: heartsRow"), "the heart comes after the star")
+  const stars = row.slice(row.indexOf("id: starsRow"), row.indexOf("id: heartsRow"))
   assert.match(stars, /visible: root\.stars !== ""/)
   assert.match(stars, /text: "󰓎"[\s\S]*?color: "#f5c518"/)
   assert.match(stars, /text: root\.stars/)
+  const hearts = row.slice(row.indexOf("id: heartsRow"), row.indexOf("id: heartsRow") + 900)
+  assert.match(hearts, /visible: root\.hearts !== ""/)
+  assert.match(hearts, /text: "󰋑"[\s\S]*?color: "#e5484d"/)
+  assert.match(hearts, /text: root\.hearts/)
+  assert.match(hearts, /textFormat: Text\.PlainText/)
+  // The name yields to whichever counts are showing.
+  assert.match(row, /readonly property real countsWidth: countsRow\.visible \? countsRow\.width \+ marks\.spacing : 0/)
+  assert.match(row, /id: nameLine[\s\S]*?height: Math\.max\(marks\.implicitHeight, countsRow\.implicitHeight\)/)
   // The name yields to everything else on its line.
-  assert.match(row, /id: name[\s\S]*?width: Math\.min\(implicitWidth, nameLine\.width - nameLine\.pillsWidth - nameLine\.starsWidth\)/)
+  assert.match(row, /id: name[\s\S]*?width: Math\.min\(implicitWidth, nameLine\.width - nameLine\.pillsWidth - nameLine\.countsWidth\)/)
 })
 
 test("release navigation is one shared component and the details version is a release link", () => {

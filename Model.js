@@ -1191,23 +1191,42 @@ function verifiedIdSet(entries) {
   return set
 }
 
-// GitHub stars per plugin id, from the marketplace catalog, so an installed
-// row can wear the count its listing has. Same null-prototype set discipline
-// as verifiedIdSet: ids are untrusted property names.
-function catalogStarsById(entries) {
-  var stars = Object.create(null)
+// One catalog count per plugin id, from the marketplace catalog, so an
+// installed row can wear the counts its listing has. Same null-prototype set
+// discipline as verifiedIdSet: ids are untrusted property names. Unknown
+// counts are left out; a real zero is kept.
+function catalogCountById(entries, field) {
+  var counts = Object.create(null)
   for (var i = 0; i < (entries || []).length; i++) {
     var entry = entries[i]
     if (!entry || !entry.id) continue
-    var count = catalogCount(entry.stars)
-    if (count !== null) stars[String(entry.id)] = count
+    var count = catalogCount(entry[field])
+    if (count !== null) counts[String(entry.id)] = count
   }
-  return stars
+  return counts
+}
+
+function rowCountLabel(row, countsById) {
+  if (!row || !row.id || !hasOwnKey(countsById, row.id)) return ""
+  return starLabel(countsById[String(row.id)])
+}
+
+// GitHub stars per plugin id.
+function catalogStarsById(entries) {
+  return catalogCountById(entries, "stars")
 }
 
 function rowStarLabel(row, starsById) {
-  if (!row || !row.id || !hasOwnKey(starsById, row.id)) return ""
-  return starLabel(starsById[String(row.id)])
+  return rowCountLabel(row, starsById)
+}
+
+// Marketplace hearts per plugin id.
+function catalogHeartsById(entries) {
+  return catalogCountById(entries, "marketplaceHearts")
+}
+
+function rowHeartLabel(row, heartsById) {
+  return rowCountLabel(row, heartsById)
 }
 
 function isVerified(row, verifiedIds) {

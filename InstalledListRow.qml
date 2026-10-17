@@ -17,6 +17,8 @@ Rectangle {
   // The GitHub star count from the marketplace listing, already formatted
   // ("120", "2k"); empty when the listing has none.
   property string stars: ""
+  // The Marketplace heart count, formatted the same way; empty when unknown.
+  property string hearts: ""
   property bool showSeparator: false
   property color foreground: Color.foreground
   required property color secondaryForeground
@@ -60,17 +62,17 @@ Rectangle {
     anchors.verticalCenter: parent.verticalCenter
     spacing: Style.space(3)
 
-    // The state mark, then the name and its pill; the star count keeps the
-    // right edge. The name yields to all of them rather than pushing them off the
+    // The state mark, then the name and its pill; the star and heart counts
+    // keep the right edge. The name yields to all of them rather than pushing them off the
     // row.
     Item {
       id: nameLine
       width: parent.width
-      height: Math.max(marks.implicitHeight, starsRow.implicitHeight)
+      height: Math.max(marks.implicitHeight, countsRow.implicitHeight)
 
       readonly property real pillsWidth: (stateMark.visible ? stateMark.width + marks.spacing : 0)
         + (verifiedPill.visible ? verifiedPill.width + marks.spacing : 0)
-      readonly property real starsWidth: starsRow.visible ? starsRow.width + marks.spacing : 0
+      readonly property real countsWidth: countsRow.visible ? countsRow.width + marks.spacing : 0
 
       Row {
         id: marks
@@ -106,7 +108,7 @@ Rectangle {
           // Never rich text: AutoText would fetch what a crafted string points at.
           textFormat: Text.PlainText
           anchors.verticalCenter: parent.verticalCenter
-          width: Math.min(implicitWidth, nameLine.width - nameLine.pillsWidth - nameLine.starsWidth)
+          width: Math.min(implicitWidth, nameLine.width - nameLine.pillsWidth - nameLine.countsWidth)
           text: root.row ? root.row.name : ""
           color: root.foreground
           font.family: root.fontFamily
@@ -138,32 +140,70 @@ Rectangle {
 
       }
 
-      // The same gold star the Browse cards wear, with the listing's count.
+      // The same gold star and red heart the Browse cards wear, with the
+      // listing's counts. A Row skips hidden children, so its width is just
+      // what is showing: stars only, hearts only, or both. Visibility keys off
+      // the counts, not the children: a child's `visible` reads false while
+      // this row is hidden, so the row could never come back once hidden.
       Row {
-        id: starsRow
+        id: countsRow
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        visible: root.stars !== ""
-        spacing: Style.space(2)
+        visible: root.stars !== "" || root.hearts !== ""
+        spacing: Style.space(6)
 
-        Text {
-          // Never rich text: AutoText would fetch what a crafted string points at.
-          textFormat: Text.PlainText
+        Row {
+          id: starsRow
           anchors.verticalCenter: parent.verticalCenter
-          text: "󰓎"
-          color: "#f5c518"
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
+          visible: root.stars !== ""
+          spacing: Style.space(2)
+
+          Text {
+            // Never rich text: AutoText would fetch what a crafted string points at.
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+            text: "󰓎"
+            color: "#f5c518"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Text {
+            // Never rich text: AutoText would fetch what a crafted string points at.
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.stars
+            color: root.secondaryForeground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
         }
 
-        Text {
-          // Never rich text: AutoText would fetch what a crafted string points at.
-          textFormat: Text.PlainText
+        Row {
+          id: heartsRow
           anchors.verticalCenter: parent.verticalCenter
-          text: root.stars
-          color: root.secondaryForeground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
+          visible: root.hearts !== ""
+          spacing: Style.space(2)
+
+          Text {
+            // Never rich text: AutoText would fetch what a crafted string points at.
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+            text: "󰋑"
+            color: "#e5484d"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Text {
+            // Never rich text: AutoText would fetch what a crafted string points at.
+            textFormat: Text.PlainText
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.hearts
+            color: root.secondaryForeground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
         }
       }
     }

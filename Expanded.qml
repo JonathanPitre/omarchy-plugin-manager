@@ -226,6 +226,7 @@ Item {
   property alias catalog: store.catalog
   readonly property alias verifiedIds: store.verifiedIds
   readonly property alias starsById: store.starsById
+  readonly property alias heartsById: store.heartsById
   property alias catalogLoading: store.catalogLoading
   property alias catalogLoaded: store.catalogLoaded
   property alias catalogError: store.catalogError
@@ -1498,6 +1499,7 @@ Item {
                 row: modelData
                 verified: Model.isVerified(modelData, root.verifiedIds)
                 stars: Model.rowStarLabel(modelData, root.starsById)
+                hearts: Model.rowHeartLabel(modelData, root.heartsById)
                 selected: root.selectedIndex === index
                 showSeparator: index < root.installedRows.length - 1 // qmllint disable unqualified
                 foreground: root.foreground
@@ -1532,6 +1534,7 @@ Item {
                 row: modelData
                 verified: Model.isVerified(modelData, root.verifiedIds)
                 stars: Model.rowStarLabel(modelData, root.starsById)
+                hearts: Model.rowHeartLabel(modelData, root.heartsById)
                 selected: root.selectedIndex === globalIndex
                 showSeparator: index < root.builtinRows.length - 1 // qmllint disable unqualified
                 foreground: root.foreground
