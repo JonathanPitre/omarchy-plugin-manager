@@ -36,7 +36,7 @@ function starStore() {
     ${names.map(qmlFunction).join("\n")}
     return { ${names.join(", ")} }
   }`)(state))
-  const process = store.slice(store.indexOf("    id: starProc"), store.indexOf("    id: heartProc"))
+  const process = store.slice(store.indexOf("    id: starProc"), store.indexOf("    id: barMoveProc"))
   const run = code => new Function("root", "Qt", "running", code)(state, state.Qt, state.starProc.running)
   const events = {
     started() { run(process.match(/onStarted: \{([\s\S]*?)\n    \}/)[1]) },
@@ -86,7 +86,7 @@ test("duplicate clicks are rejected and completion uses the captured repository 
   events.output('{"kind":"changed","starred":true}')
   events.stopped()
   assert.equal(state.starBusy, false)
-  assert.deepEqual(effects.slice(1), [["count", "acme.thing", "stars", 1], ["status", "Starred Thing", false]])
+  assert.deepEqual(effects.slice(1), [["count", "acme.thing", 1], ["status", "Starred Thing", false]])
   assert.equal(state.pendingStarRequest, null)
 })
 
@@ -103,7 +103,7 @@ test("all started, output, and exit callback orders retain busy until settlement
     }
     events.stopped()
     assert.equal(state.starBusy, false)
-    assert.deepEqual(effects.slice(1), [["count", "acme.thing", "stars", -1],
+    assert.deepEqual(effects.slice(1), [["count", "acme.thing", -1],
       ["status", "Removed the star from Thing", false]])
     state.finishStar()
     assert.equal(effects.length, 3, "settlement must not apply the count twice")
@@ -171,5 +171,5 @@ test("each click checks anew after a completed click and rejects an invalid repo
     events.stopped()
   }
   assert.deepEqual(effects.filter(effect => effect[0] === "count"),
-    [["count", "acme.thing", "stars", 1], ["count", "acme.thing", "stars", -1]])
+    [["count", "acme.thing", 1], ["count", "acme.thing", -1]])
 })

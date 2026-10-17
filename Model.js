@@ -1662,7 +1662,7 @@ function starLabel(count) {
   return String(stars)
 }
 
-// ---- Star and heart actions -------------------------------------------------
+// ---- Star actions -----------------------------------------------------------
 //
 // The repository a star would act on: an exact GitHub slug, or "" when the
 // listing names nothing starrable. githubRepoSlug already narrows to an exact
@@ -1697,49 +1697,6 @@ function parseStarResult(text, exitCode) {
   return failed
 }
 
-// Plugin ids are untrusted catalog text. The engagement API takes the same
-// shape the website requires, so only that shape is ever posted.
-var ENGAGEMENT_PLUGIN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
-
-function engagementPluginId(value) {
-  if (typeof value !== "string" || !ENGAGEMENT_PLUGIN_ID.test(value)) return ""
-  var lower = value.toLowerCase()
-  if (lower === "__proto__" || lower === "constructor" || lower === "prototype") return ""
-  return value
-}
-
-var ENGAGEMENT_API_BASE = "https://api.omarchyplugins.com/v1"
-
-function heartPostCommand(pluginId) {
-  var id = engagementPluginId(pluginId)
-  if (id === "") return []
-  return [
-    "curl", "--silent", "--show-error",
-    "--request", "POST", "--connect-timeout", "3", "--max-time", "5",
-    "--header", "Accept: application/json",
-    "--header", "Content-Type: application/json",
-    // The worker rejects a POST that does not come from the marketplace site.
-    "--header", "Origin: https://plugins.omarchy.org",
-    "--data", JSON.stringify({ pluginId: id, type: "heart" }),
-    ENGAGEMENT_API_BASE + "/events"
-  ]
-}
-
-// Reads the heart POST's answer. "recorded" counted, "repeat" was already
-// counted from this network, and anything else means the heart needs a retry.
-function parseHeartResult(text) {
-  var payload = null
-  try {
-    payload = JSON.parse(String(text || "").trim())
-  } catch (error) {
-    return ""
-  }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return ""
-  if (payload.recorded === true) return "recorded"
-  if (payload.recorded === false && payload.reason === "repeat") return "repeat"
-  return ""
-}
-
 // Optimistic count moves after a successful toggle. Unknown stays unknown:
 // a missing count is not a zero, and bumping it would invent a number the
 // source never supplied.
@@ -1747,41 +1704,6 @@ function bumpCount(count, delta) {
   var base = catalogCount(count)
   if (base === null) return null
   return Math.max(0, base + delta)
-}
-
-// Hearted ids the other surface (or an earlier session) already sent, kept in
-// one cache file both stores read. The website keeps the same memory in
-// localStorage; without it a second surface would POST the heart again.
-var HEARTS_CACHE_SUFFIX = "/.cache/omarchy-plugin-manager/hearts.log"
-
-function heartsCachePath(home) {
-  if (typeof home !== "string" || home === "") return ""
-  return home + HEARTS_CACHE_SUFFIX
-}
-
-function heartsSaveCommand(helperPath, cachePath, pluginId) {
-  var id = engagementPluginId(pluginId)
-  if (typeof helperPath !== "string" || helperPath === ""
-      || typeof cachePath !== "string" || cachePath === "" || id === "") return []
-  return ["/usr/bin/python3", "-I", "-S", helperPath, cachePath, id]
-}
-
-// One validated id per line; anything else in the file stays out of memory.
-// Order preserved, first copy wins, so a ragged file still yields the set.
-// An absurdly large file reads as empty: re-posting a heart beats parsing
-// a gigabyte of cache on the main thread.
-function parseHeartedIds(text) {
-  var raw = String(text || "")
-  if (raw.length > 1048576) return []
-  var out = []
-  var lines = raw.split("\n")
-  for (var i = 0; i < lines.length; i++) {
-    var line = lines[i]
-    if (line.charAt(line.length - 1) === "\r") line = line.slice(0, -1)
-    var id = engagementPluginId(line)
-    if (id !== "" && out.indexOf(id) < 0) out.push(id)
-  }
-  return out
 }
 
 // What the card's button should say. The registry lists plenty of things that

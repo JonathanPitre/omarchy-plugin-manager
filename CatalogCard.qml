@@ -30,7 +30,6 @@ Rectangle {
   signal detailsRequested()
   signal installRequested()
   signal starRequested()
-  signal heartRequested()
 
   // The popup's cards carry an info and an install button. The expanded
   // panel turns them off: there, a click or Enter opens a full page that
@@ -75,7 +74,6 @@ Rectangle {
   // fell through to a colour emoji, and its ♥ is drawn hollow.
   readonly property string starSlug: Model.starSlugFor(entry)
   readonly property bool starActionable: starSlug !== ""
-  readonly property bool heartActionable: Model.engagementPluginId(entry ? entry.id : "") !== ""
   readonly property string starCountText: entry ? Model.starLabel(entry.stars) : ""
   readonly property string heartCountText: entry ? Model.starLabel(entry.marketplaceHearts) : ""
   readonly property color starColor: "#f5c518"
@@ -410,7 +408,7 @@ Rectangle {
               id: heartIcon
               textFormat: Text.PlainText
               text: "󰋑"
-              color: heartMouse.containsMouse ? "#f0676c" : root.heartColor
+              color: root.heartColor
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
             }
@@ -426,15 +424,6 @@ Rectangle {
             }
             }
 
-            // The count is the control: the number itself hearts, one way.
-            MouseArea {
-              id: heartMouse
-              anchors.fill: parent
-              enabled: root.heartActionable
-              hoverEnabled: root.heartActionable
-              cursorShape: root.heartActionable ? Qt.PointingHandCursor : Qt.ArrowCursor
-              onClicked: root.heartRequested()
-            }
           }
         }
 

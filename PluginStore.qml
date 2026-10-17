@@ -688,32 +688,21 @@ Item {
     + "fi; "
     + "notify-send -a 'Plugin Manager' \"$summary\" \"$detail\""
 
-  // ---- Star and heart -------------------------------------------------------
-  //
-  property var heartedIds: []
-  // One cache file both surfaces read, so a heart sent from the popup is
-  // never posted again from the expanded panel (or after a restart).
-  readonly property string heartsPath: Model.heartsCachePath(Quickshell.env("HOME"))
+  // ---- GitHub stars ---------------------------------------------------------
   property bool starBusy: false
-  property bool heartBusy: false
   property var pendingStarRequest: null
-  property var pendingHeartEntry: null
   property bool starExited: false
   property bool starOutputDone: false
   property int starCode: -1
   property string starOutput: ""
   property bool starStarted: false
   property bool starStartSettled: false
-  property bool heartExited: false
-  property bool heartOutputDone: false
-  property int heartCode: -1
-  property string heartOutput: ""
-  property bool heartStarted: false
 
   // A surface opens this in the browser: the signed-out star fallback.
   signal browseUrlRequested(string url)
+  signal starToggleFailed()
 
-  // Star and like notices clear themselves after a few seconds. Install and
+  // Star notices clear themselves after a few seconds. Install and
   // update messages stay until replaced.
   property string flashedText: ""
   function flashStatus(text, isError) {
@@ -728,24 +717,6 @@ Item {
     onTriggered: {
       if (root.status !== "" && root.status === root.flashedText) root.setStatus("", false)
     }
-  }
-
-  function isHearted(id) {
-    return heartedIds.indexOf(String(id)) >= 0
-  }
-
-  // Fold file ids into memory. Runs at startup and whenever the other
-  // surface saves, so each store sees every heart exactly once. Reports
-  // whether anything arrived, so the caller can refresh counts the file
-  // cannot carry.
-  function unionHearts(text) {
-    var known = Model.parseHeartedIds(text)
-    var missing = []
-    for (var i = 0; i < known.length; i++) {
-      if (heartedIds.indexOf(known[i]) < 0) missing.push(known[i])
-    }
-    if (missing.length > 0) heartedIds = heartedIds.concat(missing)
-    return missing.length > 0
   }
 
   function toggleStar(entry) {
@@ -787,82 +758,21 @@ Item {
     if (!request) return
     var result = starStarted ? Model.parseStarResult(starOutput, starCode) : { kind: "fallback" }
     if (result.kind === "fallback") {
+      starToggleFailed()
       browseUrlRequested("https://github.com/" + request.slug)
       return
     }
     if (result.kind === "failed") {
+      starToggleFailed()
       flashStatus("Could not change the star for " + request.name, true)
       return
     }
-    bumpCatalogCount(request.id, "stars", result.starred ? 1 : -1)
+    bumpCatalogCount(request.id, result.starred ? 1 : -1)
     flashStatus(result.starred ? "Starred " + request.name
       : "Removed the star from " + request.name, false)
   }
 
-  function sendHeart(entry) {
-    if (heartBusy || !entry) return false
-    var id = Model.engagementPluginId(entry.id)
-    if (id === "") return false
-    if (isHearted(id)) {
-      loadCatalog(true)
-      flashStatus(entry.name + " was already liked.", false)
-      return true
-    }
-    var command = Model.heartPostCommand(id)
-    if (command.length === 0) return false
-    pendingHeartEntry = entry
-    heartExited = false
-    heartOutputDone = false
-    heartCode = -1
-    heartOutput = ""
-    heartStarted = false
-    heartBusy = true
-    flashStatus("Liking " + entry.name + "…", false)
-    heartProc.command = command
-    heartProc.running = true
-    return true
-  }
-
-  function finishHeart() {
-    if (!heartExited || !heartOutputDone) return
-    var entry = pendingHeartEntry
-    pendingHeartEntry = null
-    heartBusy = false
-    if (!entry || !heartStarted || heartCode !== 0) {
-      if (entry) flashStatus("Could not like " + entry.name + ". Try again.", true)
-      return
-    }
-    var result = Model.parseHeartResult(heartOutput)
-    if (result === "") {
-      flashStatus("Could not like " + entry.name + ". Try again.", true)
-      return
-    }
-    // A repeat can outlive the cached count; fetch current totals without
-    // inventing another increment for a heart the API already counted.
-    var id = Model.engagementPluginId(entry.id)
-    if (heartedIds.indexOf(id) < 0) {
-      heartedIds = heartedIds.concat(id)
-      saveHeartedId(id)
-    }
-    if (result === "recorded") bumpCatalogCount(entry.id, "marketplaceHearts", 1)
-    else loadCatalog(true)
-    flashStatus(result === "recorded" ? entry.name + " was liked."
-      : entry.name + " was already liked.", false)
-  }
-
-  // Best effort: memory already holds the id for this session, so a failed
-  // save only loses the cross-surface memory, never the heart itself.
-  function saveHeartedId(id) {
-    var helperPath = decodeURIComponent(Qt.resolvedUrl("helpers/hearts.py").toString().replace(/^file:\/\//, ""))
-    var command = Model.heartsSaveCommand(helperPath, heartsPath, id)
-    if (command.length === 0) return false
-    heartSaveProc.command = command
-    heartSaveProc.running = true
-    return true
-  }
-
-  function bumpCatalogCount(id, field, delta) {
-    if (field !== "stars" && field !== "marketplaceHearts") return
+  function bumpCatalogCount(id, delta) {
     var key = String(id)
     var out = []
     var touched = false
@@ -871,7 +781,7 @@ Item {
       if (entry && String(entry.id) === key) {
         var copy = {}
         for (var name in entry) copy[name] = entry[name]
-        copy[field] = Model.bumpCount(entry[field], delta)
+        copy.stars = Model.bumpCount(entry.stars, delta)
         out.push(copy)
         touched = true
       } else {
@@ -904,42 +814,6 @@ Item {
       root.finishStar()
     }
     onRunningChanged: if (!running) Qt.callLater(root.settleStarStart)
-  }
-
-  Process {
-    id: heartProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.heartOutput = text
-        root.heartOutputDone = true
-        root.finishHeart()
-      }
-    }
-    onStarted: root.heartStarted = true
-    onExited: function(exitCode) {
-      root.heartCode = exitCode
-      root.heartExited = true
-      root.finishHeart()
-    }
-  }
-
-  // Fire and forget: one id per run, appended, so concurrent surfaces never
-  // lose each other's ids and nothing waits on the write.
-  Process {
-    id: heartSaveProc
-  }
-
-  // A missing file on first run is normal: nothing is remembered yet.
-  FileView {
-    id: heartsFile
-    path: root.heartsPath
-    printErrors: false
-    watchChanges: root.heartsPath !== ""
-    onLoaded: root.unionHearts(text())
-    // A heart from the other surface carries no counts, so refresh them
-    // from the catalog instead of inventing an increment here.
-    onFileChanged: if (root.unionHearts(text())) root.loadCatalog(true)
   }
 
   // ---- Asking -------------------------------------------------------------

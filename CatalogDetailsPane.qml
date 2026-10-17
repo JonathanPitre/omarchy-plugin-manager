@@ -21,7 +21,6 @@ Item {
   property bool actionsEnabled: true
   readonly property string starSlug: Model.starSlugFor(entry)
   readonly property bool starActionable: starSlug !== ""
-  readonly property bool heartActionable: Model.engagementPluginId(entry ? entry.id : "") !== ""
   property color background: Color.menu.background
   property color foreground: Color.foreground
   required property color secondaryForeground
@@ -30,7 +29,6 @@ Item {
   signal backRequested()
   signal installRequested()
   signal starRequested()
-  signal heartRequested()
   signal previewUndecodable()
   signal githubNavigationRequested(var candidates, string fallbackUrl)
   signal repositoryNavigationRequested(string url)
@@ -264,7 +262,7 @@ Item {
                 // Never rich text: AutoText would fetch what a crafted string points at.
                 textFormat: Text.PlainText
                 text: "󰋑"
-                color: heartMouse.containsMouse ? "#f0676c" : "#e5484d"
+                color: "#e5484d"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.display
               }
@@ -281,15 +279,6 @@ Item {
               }
               }
 
-              // The count is the control: the number itself hearts, one way.
-              MouseArea {
-                id: heartMouse
-                anchors.fill: parent
-                enabled: root.heartActionable
-                hoverEnabled: root.heartActionable
-                cursorShape: root.heartActionable ? Qt.PointingHandCursor : Qt.ArrowCursor
-                onClicked: root.heartRequested()
-              }
             }
           }
         }

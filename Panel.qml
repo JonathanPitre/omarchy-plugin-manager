@@ -89,11 +89,18 @@ Panel {
   property alias loading: store.loading
   property alias loadError: store.loadError
   property int selectedIndex: -1
-  // A star or a like rebuilds the grid's model, which drops the scroll offset
+  // A star rebuilds the grid's model, which drops the scroll offset
   // back to the top. The click snapshots offset and focus; the rebuild lands
   // back where the eye was.
   property real pendingBrowseY: -1
   property bool pendingBrowseFocus: false
+  Connections {
+    target: store
+    function onStarToggleFailed() {
+      root.pendingBrowseY = -1
+      root.pendingBrowseFocus = false
+    }
+  }
 
   property string groupFilter: "all"
   readonly property var groupOptions: Model.groupOptions()
@@ -1891,14 +1898,10 @@ Panel {
               root.askInstall(modelData)
             }
             onStarRequested: {
-              root.pendingBrowseY = catalogGrid.contentY
-              root.pendingBrowseFocus = catalogGrid.activeFocus
-              store.toggleStar(modelData)
-            }
-            onHeartRequested: {
-              root.pendingBrowseY = catalogGrid.contentY
-              root.pendingBrowseFocus = catalogGrid.activeFocus
-              store.sendHeart(modelData)
+              if (store.toggleStar(modelData)) {
+                root.pendingBrowseY = catalogGrid.contentY
+                root.pendingBrowseFocus = catalogGrid.activeFocus
+              }
             }
           }
         }
@@ -2308,14 +2311,10 @@ Panel {
         }
         onInstallRequested: root.askInstall(root.detailsEntry)
         onStarRequested: {
-          root.pendingBrowseY = catalogGrid.contentY
-          root.pendingBrowseFocus = catalogGrid.activeFocus
-          store.toggleStar(root.detailsEntry)
-        }
-        onHeartRequested: {
-          root.pendingBrowseY = catalogGrid.contentY
-          root.pendingBrowseFocus = catalogGrid.activeFocus
-          store.sendHeart(root.detailsEntry)
+          if (store.toggleStar(root.detailsEntry)) {
+            root.pendingBrowseY = catalogGrid.contentY
+            root.pendingBrowseFocus = catalogGrid.activeFocus
+          }
         }
       }
 

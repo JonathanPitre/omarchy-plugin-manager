@@ -725,19 +725,12 @@ come from `https://api.omarchyplugins.com/v1/stats` at
 `plugins[pluginId].hearts`. Missing or malformed counts are omitted rather than
 shown as zero.
 
-The counts are also the controls, so no new button competes with the card's
-details action. Clicking the star count toggles the GitHub star without
-leaving when the GitHub CLI is signed in: a second click removes the star
-again. When `gh` is missing or not signed in, the click opens the repository
-page in your browser instead, where GitHub shows its own sign-in page.
-Each click checks GitHub afresh. Direct connections are reused for the change.
-Clicking the heart count sends the marketplace heart one way. The engagement
-API records hearts only and answers `repeat` for a network that already
-hearted, so a heart cannot be removed again from here. A confirmed change updates
-the count and names the plugin on the status line. An already-counted heart
-refreshes the total. Sent hearts are remembered in the cache, so neither the
-other view nor a restart can send one twice. Star and like notices clear
-themselves after a few seconds.
+The GitHub star count is also the control, so no new button competes with the
+card's details action. Clicking it toggles the star without leaving when the
+GitHub CLI is signed in. When the CLI is missing or not signed in, the click
+opens the repository in your browser instead. Each click checks GitHub afresh.
+Star notices clear themselves after a few seconds. Marketplace heart counts
+remain read-only until the marketplace API supports plugin clients.
 
 For an exact GitHub repository, opening the Release action checks names
 `v<version>` and then `<version>` through the same bounded, click-time probe used

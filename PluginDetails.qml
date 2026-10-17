@@ -25,7 +25,6 @@ Item {
   signal closed()
   signal installRequested()
   signal starRequested()
-  signal heartRequested()
   signal previewUndecodable()
   signal githubNavigationRequested(var candidates, string fallbackUrl)
   signal repositoryNavigationRequested(string url)
@@ -69,7 +68,7 @@ Item {
     if (Model.starLabel(entry.stars) !== "")
       rows.push({ label: "GitHub stars", value: Model.starLabel(entry.stars), action: "star" })
     if (Model.starLabel(entry.marketplaceHearts) !== "")
-      rows.push({ label: "Marketplace hearts", value: Model.starLabel(entry.marketplaceHearts), action: "heart" })
+      rows.push({ label: "Marketplace hearts", value: Model.starLabel(entry.marketplaceHearts) })
     rows.push({ label: "Availability", value: stateText })
     if (needsPlacement)
       rows.push({ label: "Placement", value: "Choose a bar section before installation" })
@@ -313,7 +312,7 @@ Item {
                   width: detailsContent.width
                   height: Math.max(fieldLabel.implicitHeight, fieldValue.implicitHeight)
 
-                  readonly property bool isAction: modelData.action === "star" || modelData.action === "heart"
+                  readonly property bool isAction: modelData.action === "star"
 
                   Text {
                     id: fieldLabel
@@ -341,15 +340,14 @@ Item {
                     font.underline: field.isAction && actionMouse.containsMouse
                     wrapMode: Text.WordWrap
 
-                    // The star and heart rows are the controls: the values
-                    // star and heart with no new button.
+                    // The star count remains the control, so it needs no new button.
                     MouseArea {
                       id: actionMouse
                       anchors.fill: parent
                       enabled: field.isAction
                       hoverEnabled: field.isAction
                       cursorShape: field.isAction ? Qt.PointingHandCursor : Qt.ArrowCursor
-                      onClicked: field.modelData.action === "star" ? root.starRequested() : root.heartRequested()
+                    onClicked: if (field.modelData.action === "star") root.starRequested()
                     }
                   }
                 }

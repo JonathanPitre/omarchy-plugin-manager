@@ -141,7 +141,7 @@ Item {
   function loadEverything() {
     if (!opened || barMovePending) return
     store.loadOnOpen()
-    // The popup may have starred or liked since this window's cached fetch.
+  // The popup may have changed a star since this window's cached fetch.
     // Refreshing here is what makes those counts current on open.
     if (root.browsing) store.loadCatalog(true)
   }
@@ -367,11 +367,18 @@ Item {
   // ---- Installed --------------------------------------------------------------
 
   property int selectedIndex: -1
-  // A star or a like rebuilds the grid's model, which drops the scroll offset
+  // A star rebuilds the grid's model, which drops the scroll offset
   // back to the top. The click snapshots offset and focus; the rebuild lands
   // back where the eye was.
   property real pendingBrowseY: -1
   property bool pendingBrowseFocus: false
+  Connections {
+    target: store
+    function onStarToggleFailed() {
+      root.pendingBrowseY = -1
+      root.pendingBrowseFocus = false
+    }
+  }
   // What the lists filter on. It follows the search box after a short pause
   // rather than on every keystroke: each change rebuilds every visible row or
   // card, and a word typed at speed would rebuild them once per letter.
@@ -1705,14 +1712,10 @@ Item {
               root.askInstall(modelData)
             }
             onStarRequested: {
-              root.pendingBrowseY = catalogGrid.contentY
-              root.pendingBrowseFocus = catalogGrid.activeFocus
-              store.toggleStar(modelData)
-            }
-            onHeartRequested: {
-              root.pendingBrowseY = catalogGrid.contentY
-              root.pendingBrowseFocus = catalogGrid.activeFocus
-              store.sendHeart(modelData)
+              if (store.toggleStar(modelData)) {
+                root.pendingBrowseY = catalogGrid.contentY
+                root.pendingBrowseFocus = catalogGrid.activeFocus
+              }
             }
           }
         }
@@ -1788,14 +1791,10 @@ Item {
         onBackRequested: root.closeDetails()
         onInstallRequested: root.askInstall(root.detailsEntry)
         onStarRequested: {
-          root.pendingBrowseY = catalogGrid.contentY
-          root.pendingBrowseFocus = catalogGrid.activeFocus
-          store.toggleStar(root.detailsEntry)
-        }
-        onHeartRequested: {
-          root.pendingBrowseY = catalogGrid.contentY
-          root.pendingBrowseFocus = catalogGrid.activeFocus
-          store.sendHeart(root.detailsEntry)
+          if (store.toggleStar(root.detailsEntry)) {
+            root.pendingBrowseY = catalogGrid.contentY
+            root.pendingBrowseFocus = catalogGrid.activeFocus
+          }
         }
         onGithubNavigationRequested: function(candidates, fallbackUrl) { root.requestGithubNavigation(candidates, fallbackUrl) }
         onRepositoryNavigationRequested: function(url) { root.navigateExternalUrl(url) }
