@@ -32,12 +32,13 @@ row actions on the right](preview.png)
 ## The expanded panel
 
 The popup is built for a glance. When you want room, the icon left of the
-refresh button (`󰊓`) hands the same manager to a full-size panel, and the `󰊔`
-icon in the same corner brings the popup back. The header, the tabs, the
+refresh button (`󰊓`) hands the same manager to a full-size panel, and the
+same corner (`󰊔`) brings the popup back. The button beside it goes straight to
+a window (``), or from the window back to the overlay (`󰊓`). The header, the tabs, the
 summary counts, the opening animation and the card flip between tabs are the
 ones the popup has; what changes is how much each tab can show. It opens as an
-overlay above everything; **Open expanded panel as a tiled window**, in the
-settings pane, makes it open as a window Hyprland tiles instead.
+overlay above everything, or as a window Hyprland tiles, and the bar opens it
+the way it was last left (below).
 
 **Installed** becomes a list beside a details pane. The rows are summaries:
 a mark leads the name — a green check when the checkout is up to date, a
@@ -285,24 +286,30 @@ the setting off, a checkout whose only difference is an unreviewed upstream
 commit carries neither the arrow nor the green check: the panel does not claim
 it is current, it says **No verified update available**.
 
-**Open expanded panel as a tiled window**, the third switch in the same pane,
-is also **off by default**. Off, the expanded panel is an overlay: it floats
-above everything, takes the keyboard while it is up, and closes on Esc or a
-click outside. On, it opens as an ordinary window, which Hyprland tiles into
-the current workspace like any app, so the manager can sit beside the terminal
-you are editing a plugin in. There is no scrim and no outside to click; Esc
-still closes it, and so does the compositor's own close. The window type is
-decided when the panel opens, from this plugin's entry read straight out of
-`shell.json` ahead of everything else it loads, so the switch applies the next
-time you open the panel rather than to the window you flipped it in. It is
-stored as `tiledExpandedPanel: true` in the same entry, written the same way.
+**How it opens** is the buttons in the header rather than a switch in this
+pane, and every form has a direct way to the other two. The corner slot is the
+same on every surface: in the popup it expands to the overlay, and in the
+overlay or the window it goes back to the popup. The button beside it opens
+the window from the popup or the overlay, and the overlay from the window. The bar opens the
+manager the way it was last left; the popup is the default. The overlay floats above everything, takes the keyboard
+while it is up, and closes on Esc or a click outside. The window is an ordinary
+one, which Hyprland tiles into the current workspace like any app, so the
+manager can sit beside the terminal you are editing a plugin in. There is no
+scrim and no outside to click; Esc still closes it, and so does the
+compositor's own close. Going from the overlay to the window happens in place:
+the card moves to the new host and nothing reloads. Clicking the bar while the
+window is open on another workspace goes to it. The choice is stored as
+`openAs` (`popup`, `overlay` or `window`) in this plugin's entry and read
+straight out of `shell.json` when the bar is clicked, ahead of everything else
+it loads. An entry that still has the old `tiledExpandedPanel: true` opens as
+a window, and the key is dropped the next time one of the buttons writes.
 
 One Hyprland note: the window carries the shell's own app id rather than one of
 its own, so a per-window rule has to match its title:
 `windowrule = float, title:^(Plugin Manager)$` is what would undo the tiling
 for it.
 
-**Restart Shell**, the button under the three switches, clears Quickshell's
+**Restart Shell**, the button under the two switches, clears Quickshell's
 compiled-QML cache and runs `omarchy restart shell`, so every plugin, this one
 included, is loaded again from what is on disk. Reach for it when a plugin
 edited in place keeps showing its old self after a rescan. What is removed is
@@ -647,6 +654,10 @@ Never resolve a collision by overwriting an archived transaction.
 
 Once clicked, the finite worker runs independently of the QML observer. Closing
 the window is **not cancellation**, including during a manager self-update.
+For a bulk update, a worker stop signal finishes the current preparation and
+skips unstarted items. Already checked updates still apply after final safety
+checks, followed by a shell rescan and the recorded summary. There is no bulk
+Stop control in the panel.
 The already-loaded Python worker retains no dependency on reopening its helper
 source after publication. Its bounded notification and transaction records
 outlive the window. A rescan failure reports **updated; reload failed** or
@@ -856,7 +867,7 @@ url cannot become a command. Urls are also validated against `https://`,
 | `t` | Installed: cycle the Status dropdown |
 | `c` `a` | Browse: cycle the Category and Availability dropdowns |
 | `1` `2` | Switch to the Installed / Browse tab |
-| `r` | Re-read the plugin list or re-fetch the active Browse catalog |
+| `r` | Refresh the plugin list or re-fetch the active Browse catalog |
 | `Esc` | Clear the search, then leave the field, then close the panel |
 
 In the popup's Browse details, `Tab`, `Shift+Tab`, and the arrow keys move

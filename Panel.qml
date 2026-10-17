@@ -148,6 +148,7 @@ Panel {
   // the Installed re-read includes its update check, Browse the catalog fetch.
   readonly property bool refreshing: browsing ? catalogLoading : (loading || checkingUpdates)
   readonly property alias behindCount: store.behindCount
+  readonly property alias bulkUpdatableCount: store.bulkUpdatableCount
   readonly property alias updateActionsEnabled: store.updateActionsEnabled
 
   // One click-time release probe for the whole panel. Every explicit
@@ -384,7 +385,7 @@ Panel {
   // Hand over to the expanded window on the tab you were looking at. Close
   // first: the popup and the panel are never up together. A bar without a
   // shell reference (tests, odd hosts) makes this a no-op rather than a throw.
-  function expand(page) {
+  function expand(page, mode) {
     if (!bar || !bar.shell || typeof bar.shell.summon !== "function") return
     var tab = activeTab
     // Name the output this popup sits on so the expanded window opens on the
@@ -393,7 +394,45 @@ Panel {
     revokeReleaseNavigation()
     closeArrange()
     close()
-    bar.shell.summon(pluginId, JSON.stringify({ tab: tab, screen: screenName, page: page === "arrange" ? "arrange" : "" }))
+    var payload = { tab: tab, screen: screenName, page: page === "arrange" ? "arrange" : "" }
+    if (mode === "overlay" || mode === "window") payload.mode = mode
+    bar.shell.summon(pluginId, JSON.stringify(payload))
+  }
+
+  // The corner button: the next form after the popup is the overlay, and
+  // choosing it is also how it is remembered. The mode rides in the summon
+  // because the write may not have reached shell.json when the panel reads it.
+  // A setting that could not be written opens nothing, so what shows and what
+  // is saved never part.
+  function advanceOpenAs() {
+    if (!store.setOpenAs("overlay")) return
+    expand("", "overlay")
+  }
+
+  // Straight to the window, without passing through the overlay.
+  function openAsWindow() {
+    if (!store.setOpenAs("window")) return
+    expand("", "window")
+  }
+
+  // A click on the bar opens whichever form was chosen last. Read from
+  // shell.json rather than the store, which has not loaded before the first
+  // open; the same blocking read the expanded window makes for the same reason.
+  function openFromBar() {
+    if (opened) { close(); return }
+    configView.reload()
+    var mode = Model.openAs(Model.parseSelfSettings(
+      Model.selfEntryFromShellConfig(configView.text(), pluginId)))
+    if (mode === "popup") open()
+    else expand("", mode)
+  }
+
+  FileView {
+    id: configView
+    path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
+    preload: false
+    blockAllReads: true
+    printErrors: false
   }
 
   function switchTab(tab) {
@@ -707,6 +746,11 @@ Panel {
     store.startUpdate(row)
   }
 
+  function askBulkUpdate() {
+    if (!store.askBulkUpdate()) return
+    revokeReleaseNavigation()
+  }
+
   // ---- Keyboard -----------------------------------------------------------
 
   // In a grid, "down" means the card below, not the next one along — so the
@@ -799,6 +843,7 @@ Panel {
         else if ((t === "c" || t === "C") && root.browsing) root.cycleCategoryFilter()
         else if ((t === "a" || t === "A") && root.browsing) root.cycleAvailabilityFilter()
         else if ((t === "t" || t === "T") && !root.browsing) root.cycleStatusFilter()
+        else if ((t === "u" || t === "U") && !root.browsing) root.askBulkUpdate()
         else if (t === "j") root.moveSelection(0, 1)
         else if (t === "k") root.moveSelection(0, -1)
         else if (t === "1") root.switchTab("installed")
@@ -988,7 +1033,7 @@ Panel {
           // same switch the expanded window shows, reached from here too.
           PanelActionButton {
             id: settingsButton
-            anchors.right: expandButton.left
+            anchors.right: windowButton.left
             anchors.rightMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             iconText: "󰒓"
@@ -1001,11 +1046,26 @@ Panel {
             onClicked: root.settingsOpen ? root.closeSettings() : root.openSettings()
           }
 
+          PanelActionButton {
+            id: windowButton
+            anchors.right: expandButton.left
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "\uf2d0"
+            fontSize: Style.font.display
+            tooltipText: "Open as a window"
+            foreground: root.contentForeground
+            fontFamily: root.contentFontFamily
+            enabled: !root.busy
+            opacity: enabled ? 1 : 0.4
+            onClicked: root.openAsWindow()
+          }
+
           // Icon only, like the refresh beside it: the popup's header has no
           // room for a labelled button, and the tooltip says the rest.
           PanelActionButton {
             id: expandButton
-            anchors.right: refreshButton.left
+            anchors.right: updateAllButton.visible ? updateAllButton.left : refreshButton.left
             anchors.rightMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             iconText: "󰊓"
@@ -1015,7 +1075,23 @@ Panel {
             fontFamily: root.contentFontFamily
             enabled: !root.busy
             opacity: enabled ? 1 : 0.4
-            onClicked: root.expand()
+            onClicked: root.advanceOpenAs()
+          }
+
+          PanelActionButton {
+            id: updateAllButton
+            anchors.right: refreshButton.left
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            visible: !root.browsing
+            iconText: "󰑐"
+            fontSize: Style.font.display
+            tooltipText: "Update all"
+            foreground: root.contentForeground
+            fontFamily: root.contentFontFamily
+            enabled: root.updateActionsEnabled
+            opacity: root.bulkUpdatableCount > 0 && enabled ? 1 : 0.4
+            onClicked: root.askBulkUpdate()
           }
 
           PanelActionButton {
@@ -1025,12 +1101,12 @@ Panel {
             // The button's own glyph steps aside while a refresh runs and the
             // spinner below takes its place: a turning arrow says "working"
             // where a greyed one only said "not now".
-            iconText: root.refreshing ? "" : "󰑐"
+            iconText: root.refreshing ? "" : "󰉹"
             // The one icon in the header, next to two text buttons: at the
             // default size it read as an afterthought beside them. Display
             // size puts it on the same scale as the title at the other end.
             fontSize: Style.font.display
-            tooltipText: root.browsing ? "Re-fetch the catalog" : "Re-read the plugin list"
+            tooltipText: root.browsing ? "Re-fetch the catalog" : "Refresh plugin list"
             foreground: root.contentForeground
             fontFamily: root.contentFontFamily
             enabled: !root.loading && !root.catalogLoading && !root.busy
@@ -1046,12 +1122,25 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              anchors.rightMargin: Style.space(2)
+              anchors.bottomMargin: Style.space(2)
+              visible: !root.refreshing
+              text: "󰑐"
+              color: refreshButton.foreground
+              font.family: refreshButton.fontFamily
+              font.pixelSize: Math.round(refreshButton.fontSize * 0.55)
+            }
+
+            Text {
               id: refreshSpinner
               // Never rich text: AutoText would fetch what a crafted string points at.
               textFormat: Text.PlainText
               anchors.centerIn: parent
               visible: root.refreshing
-              text: "󰑐"
+              text: "󰑓"
               color: refreshButton.foreground
               font.family: refreshButton.fontFamily
               font.pixelSize: refreshButton.fontSize
@@ -1068,33 +1157,38 @@ Panel {
           }
         }
 
-        // The count line gets the whole width on its own row under the
-        // title: beside it, the tabs and two icons left it elided, and
-        // "to update" was the part that got cut.
-        Text {
-          id: subtitle
-          // Never rich text: AutoText would fetch what a crafted string points at.
-          textFormat: Text.PlainText
+        Item {
           x: title.x
           width: parent.width - x
-          visible: text !== ""
-          elide: Text.ElideRight
-          text: {
-            if (root.browsing) {
-              if (root.catalogLoading && root.catalog.length === 0) return "fetching catalog…"
-              if (root.catalog.length === 0) return ""
-              return "showing " + root.visibleCatalog.length + " of " + root.catalog.length
+          height: subtitle.implicitHeight
+
+          Text {
+            id: subtitle
+            // Never rich text: AutoText would fetch what a crafted string points at.
+            textFormat: Text.PlainText
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            visible: text !== ""
+            elide: Text.ElideRight
+            text: {
+              if (root.browsing) {
+                if (root.catalogLoading && root.catalog.length === 0) return "fetching catalog…"
+                if (root.catalog.length === 0) return ""
+                return "showing " + root.visibleCatalog.length + " of " + root.catalog.length
+              }
+              if (root.loading && root.rows.length === 0) return "reading…"
+              if (root.filtered) return "showing " + root.visibleRows.length + " of " + root.rows.length
+              // Tight separators keep the line short even on its own row.
+              var summary = root.installedTotal + " installed · " + root.rows.length + " total"
+              if (root.behindCount > 0) return summary + " · " + root.behindCount + " to update"
+              return summary
             }
-            if (root.loading && root.rows.length === 0) return "reading…"
-            if (root.filtered) return "showing " + root.visibleRows.length + " of " + root.rows.length
-            // Tight separators keep the line short even on its own row.
-            var summary = root.installedTotal + " installed · " + root.rows.length + " total"
-            if (root.behindCount > 0) return summary + " · " + root.behindCount + " to update"
-            return summary
+            color: root.secondaryForeground
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
           }
-          color: root.secondaryForeground
-          font.family: root.contentFontFamily
-          font.pixelSize: Style.font.caption
+
         }
 
         PanelSeparator { foreground: root.contentForeground }
@@ -1435,7 +1529,8 @@ Panel {
           text: {
             if (root.settingsOpen) return root.statusSource === "layout" ? "" : root.status
             if (root.barMovePending) return root.popupMoveOwner.status + root.placementNotice
-            if (root.busy) return Model.actionGerund(root.busyKind) + " " + root.busyId + "…"
+            if (root.busy) return root.busyKind === "bulk-update" ? root.status
+              : Model.actionGerund(root.busyKind) + " " + root.busyId + "…"
             if (root.browsing && root.catalogError !== "") return root.catalogError
             if (!root.browsing && root.loadError !== "") return root.loadError
             return root.status
@@ -1491,7 +1586,7 @@ Panel {
             spacing: Style.space(10)
 
             Repeater {
-              model: Model.actionHints(root.browsing)
+              model: Model.actionHints(root.browsing, root.bulkUpdatableCount > 0)
               delegate: hintDelegate
             }
           }
@@ -2099,68 +2194,6 @@ Panel {
               PanelToolTip {
                 visible: unverifiedInstallSwitch.containsMouse
                 text: store.allowUnverifiedInstalls ? "Unverified listings can be installed" : "Only verified listings can be installed"
-                fontFamily: root.contentFontFamily
-              }
-            }
-          }
-
-          // Which window the expanded panel opens as. The window is chosen at
-          // open time, so the switch is a decision about the next one.
-          Rectangle {
-            width: parent.width
-            height: Math.max(tiledPanelText.implicitHeight, tiledPanelSwitch.implicitHeight) + Style.space(12) * 2
-            radius: Style.cornerRadius
-            color: Style.normalFill
-            border.width: 1
-            border.color: Qt.alpha(root.secondaryForeground, 0.35)
-
-            Column {
-              id: tiledPanelText
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(12)
-              anchors.right: tiledPanelSwitch.left
-              anchors.rightMargin: Style.space(16)
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(4)
-
-              Text {
-                // Never rich text: AutoText would fetch what a crafted string points at.
-                textFormat: Text.PlainText
-                width: parent.width
-                text: "Open expanded panel as a tiled window"
-                color: root.contentForeground
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.body
-                wrapMode: Text.WordWrap
-              }
-
-              Text {
-                // Never rich text: AutoText would fetch what a crafted string points at.
-                textFormat: Text.PlainText
-                width: parent.width
-                text: "Off: the expanded panel is an overlay above everything, closed by Esc or a click outside. "
-                  + "On: it opens as a regular window that Hyprland tiles in the current workspace, so it can sit beside a terminal. Takes effect on the next open."
-                color: root.secondaryForeground
-                font.family: root.contentFontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-            }
-
-            ToggleSwitch {
-              id: tiledPanelSwitch
-              anchors.right: parent.right
-              anchors.rightMargin: Style.space(12)
-              anchors.verticalCenter: parent.verticalCenter
-              checked: store.tiledExpandedPanel
-              interactive: true
-              busy: root.busy
-              foreground: root.contentForeground
-              onToggled: store.setTiledExpandedPanel(!store.tiledExpandedPanel)
-
-              PanelToolTip {
-                visible: tiledPanelSwitch.containsMouse
-                text: store.tiledExpandedPanel ? "The expanded panel opens as a tiled window" : "The expanded panel opens as an overlay"
                 fontFamily: root.contentFontFamily
               }
             }

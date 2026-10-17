@@ -41,8 +41,8 @@ Item {
     ? String(manifest.id) : "io.github.juancasanueva.plugin-manager"
 
   // Which window hosts this open: the layer-shell overlay, or a plain toplevel
-  // the compositor tiles. Decided once in open() and fixed for the life of that
-  // open, so flipping the switch applies on the next open, as the caption says.
+  // the compositor tiles. Decided in open(), and moved on by the pop-out
+  // button (overlay to window), which also remembers the choice.
   property bool tiled: false
 
   // One card, two hosts. The card is declared once and reparented into
@@ -62,7 +62,7 @@ Item {
     id: configView
     path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
     preload: false
-    blockLoading: true
+    blockAllReads: true
     printErrors: false
   }
 
@@ -94,10 +94,23 @@ Item {
       refreshBarLayout()
       return
     }
-    // Before the window shows, because it decides which window shows.
-    configView.reload()
-    tiled = Model.tiledExpandedPanel(Model.parseSelfSettings(
-      Model.selfEntryFromShellConfig(configView.text(), pluginId)))
+    // Before the window shows, because it decides which window shows. A mode
+    // in the payload comes from a button that has just written it; otherwise
+    // the setting decides.
+    var mode = Model.expandedModeFromPayload(payloadJson)
+    if (mode === "") {
+      configView.reload()
+      mode = Model.openAs(Model.parseSelfSettings(
+        Model.selfEntryFromShellConfig(configView.text(), pluginId)))
+    }
+    // Already up as a window, perhaps on another workspace: go to it rather
+    // than reopen, which from the bar would look like nothing happened. Asked
+    // for the overlay instead, the card moves host below like any open.
+    if (opened && tiled && mode === "window") {
+      focusTiledWindow()
+      return
+    }
+    tiled = mode === "window"
     activeTab = Model.expandedTabFromPayload(payloadJson)
     targetScreenName = Model.expandedScreenFromPayload(payloadJson)
     selectedIndex = -1
@@ -175,6 +188,31 @@ Item {
     PopupBridge.openPopup(screenName)
   }
 
+  // The corner button, from the overlay or the window. Each form is
+  // remembered, so the bar opens the manager the way it was last left; a
+  // setting that could not be written leaves the form as it is, so what shows
+  // and what is saved never part.
+  function backToPopup() {
+    if (barMovePending || !store.setOpenAs("popup")) return
+    collapse()
+  }
+
+  // The other full-size form, in place: the card moves host, nothing reloads.
+  function switchFullForm() {
+    if (barMovePending || !store.setOpenAs(tiled ? "overlay" : "window")) return
+    tiled = !tiled
+    showRetainedWindow()
+  }
+
+  // The toplevel's class is the shell's own, so it is found by its title. The
+  // older dispatcher is the fallback, as in omarchy-launch-or-focus.
+  function focusTiledWindow() {
+    Quickshell.execDetached(["sh", "-c",
+      'a=$(hyprctl clients -j | jq -r \'.[]|select(.class == "org.quickshell" and .title == "Plugin Manager")|.address\' | head -n1); '
+      + '[ -n "$a" ] && { hyprctl dispatch "hl.dsp.focus({ window = \\"address:$a\\" })" >/dev/null 2>&1 '
+      + '|| hyprctl dispatch focuswindow "address:$a" >/dev/null; }'])
+  }
+
   // ---- Shared state, mirrored from the store ---------------------------------
 
   property alias rows: store.rows
@@ -182,11 +220,13 @@ Item {
   property alias loadError: store.loadError
   property alias checkingUpdates: store.checkingUpdates
   readonly property alias behindCount: store.behindCount
+  readonly property alias bulkUpdatableCount: store.bulkUpdatableCount
   readonly property alias updateActionsEnabled: store.updateActionsEnabled
   readonly property alias installedTotal: store.installedTotal
   property alias catalog: store.catalog
   readonly property alias verifiedIds: store.verifiedIds
   readonly property alias starsById: store.starsById
+  readonly property alias heartsById: store.heartsById
   property alias catalogLoading: store.catalogLoading
   property alias catalogLoaded: store.catalogLoaded
   property alias catalogError: store.catalogError
@@ -766,6 +806,7 @@ Item {
         else if ((text === "f" || text === "F")) root.browsing ? root.cycleCatalogKindFilter() : root.cycleKindFilter()
         else if ((text === "s" || text === "S")) root.browsing ? root.cycleCatalogSort() : root.cycleGroupFilter()
         else if ((text === "t" || text === "T") && !root.browsing) root.cycleStatusFilter()
+        else if ((text === "u" || text === "U") && !root.browsing) { store.askBulkUpdate(); event.accepted = true }
         else if ((text === "c" || text === "C") && root.browsing) root.cycleCategoryFilter()
         else if ((text === "a" || text === "A") && root.browsing) root.cycleAvailabilityFilter()
         else if (text === "/") { searchField.forceActiveFocus(); event.accepted = true }
@@ -776,7 +817,6 @@ Item {
         }
       }
 
-      // ---- Header: what this is, the tabs, and the two icons.
       Item {
         id: header
         anchors.left: parent.left
@@ -888,7 +928,10 @@ Item {
           textFormat: Text.PlainText
           anchors.left: title.right
           anchors.leftMargin: Style.space(10)
+          anchors.right: root.browsing ? marketplaceLink.left : tabs.left
+          anchors.rightMargin: Style.space(10)
           anchors.baseline: title.baseline
+          elide: Text.ElideRight
           text: {
             if (root.browsing) {
               if (root.catalogLoading && root.catalog.length === 0) return "fetching catalog…"
@@ -969,7 +1012,7 @@ Item {
         PanelActionButton {
           id: settingsButton
           enabled: !root.barMovePending
-          anchors.right: collapseButton.left
+          anchors.right: formButton.left
           anchors.rightMargin: Style.space(6)
           anchors.verticalCenter: parent.verticalCenter
           iconText: "󰒓"
@@ -980,12 +1023,29 @@ Item {
           onClicked: root.settingsOpen ? root.closeSettings() : root.openSettings()
         }
 
+        // Overlay to window and back, beside the way to the popup.
+        PanelActionButton {
+          id: formButton
+          enabled: !root.barMovePending && !root.busy
+          opacity: enabled ? 1 : 0.4
+          anchors.right: collapseButton.left
+          anchors.rightMargin: Style.space(6)
+          anchors.verticalCenter: parent.verticalCenter
+          iconText: root.tiled ? "󰊓" : "\uf2d0"
+          fontSize: Style.font.display
+          tooltipText: root.tiled ? "Open as an overlay" : "Open as a window"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.switchFullForm()
+        }
+
         // The way back. Same slot the popup's expand icon sits in, so the
-        // eye finds the pair of them in the same corner on both surfaces.
+        // eye finds the pair of them in the same corner on every surface.
         PanelActionButton {
           id: collapseButton
-          enabled: !root.barMovePending
-          anchors.right: refreshButton.left
+          enabled: !root.barMovePending && !root.busy
+          opacity: enabled ? 1 : 0.4
+          anchors.right: updateAllButton.visible ? updateAllButton.left : refreshButton.left
           anchors.rightMargin: Style.space(6)
           anchors.verticalCenter: parent.verticalCenter
           iconText: "󰊔"
@@ -993,16 +1053,32 @@ Item {
           tooltipText: "Back to the popup"
           foreground: root.foreground
           fontFamily: root.fontFamily
-          onClicked: root.collapse()
+          onClicked: root.backToPopup()
+        }
+
+        PanelActionButton {
+          id: updateAllButton
+          anchors.right: refreshButton.left
+          anchors.rightMargin: Style.space(6)
+          anchors.verticalCenter: parent.verticalCenter
+          visible: !root.browsing
+          iconText: "󰑐"
+          fontSize: Style.font.display
+          tooltipText: "Update all"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          enabled: root.updateActionsEnabled && !root.barMovePending
+          opacity: root.bulkUpdatableCount > 0 && enabled ? 1 : 0.4
+          onClicked: store.askBulkUpdate()
         }
 
         PanelActionButton {
           id: refreshButton
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
-          iconText: root.refreshing ? "" : "󰑐"
+          iconText: root.refreshing ? "" : "󰉹"
           fontSize: Style.font.display
-          tooltipText: root.browsing ? "Re-fetch the catalog" : "Re-read the plugin list"
+          tooltipText: root.browsing ? "Re-fetch the catalog" : "Refresh plugin list"
           foreground: root.foreground
           fontFamily: root.fontFamily
           enabled: !root.loading && !root.catalogLoading && !root.busy
@@ -1014,12 +1090,25 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.rightMargin: Style.space(2)
+            anchors.bottomMargin: Style.space(2)
+            visible: !root.refreshing
+            text: "󰑐"
+            color: refreshButton.foreground
+            font.family: refreshButton.fontFamily
+            font.pixelSize: Math.round(refreshButton.fontSize * 0.55)
+          }
+
+          Text {
             id: refreshSpinner
             // Never rich text: AutoText would fetch what a crafted string points at.
             textFormat: Text.PlainText
             anchors.centerIn: parent
             visible: root.refreshing
-            text: "󰑐"
+            text: "󰑓"
             color: refreshButton.foreground
             font.family: refreshButton.fontFamily
             font.pixelSize: refreshButton.fontSize
@@ -1248,7 +1337,8 @@ Item {
           if (root.barMovePending) return root.arrangeOpen || root.statusSource !== "layout" ? root.status : ""
           if (root.arrangeOpen) return root.barSnapshot ? root.status
             : "Bar layout unavailable; waiting for host configuration."
-          if (root.busy) return Model.actionGerund(root.busyKind) + " " + root.busyId + "…"
+          if (root.busy) return root.busyKind === "bulk-update" ? root.status
+            : Model.actionGerund(root.busyKind) + " " + root.busyId + "…"
           if (root.browsing && root.catalogError !== "") return root.catalogError
           if (!root.browsing && root.loadError !== "") return root.loadError
           return root.statusSource === "layout" ? "" : root.status
@@ -1301,7 +1391,7 @@ Item {
                 { key: "2", text: "BROWSE", active: root.browsing }
               ].concat(root.browsing && root.detailsOpen
                 ? [{ key: "backspace", text: "BACK", active: false }]
-                : Model.actionHints(root.browsing).concat([{ key: "esc", text: "CLOSE", active: false }]))
+                : Model.actionHints(root.browsing, root.bulkUpdatableCount > 0).concat([{ key: "esc", text: "CLOSE", active: false }]))
               delegate: hintDelegate
             }
           }
@@ -1409,6 +1499,7 @@ Item {
                 row: modelData
                 verified: Model.isVerified(modelData, root.verifiedIds)
                 stars: Model.rowStarLabel(modelData, root.starsById)
+                hearts: Model.rowHeartLabel(modelData, root.heartsById)
                 selected: root.selectedIndex === index
                 showSeparator: index < root.installedRows.length - 1 // qmllint disable unqualified
                 foreground: root.foreground
@@ -1443,6 +1534,7 @@ Item {
                 row: modelData
                 verified: Model.isVerified(modelData, root.verifiedIds)
                 stars: Model.rowStarLabel(modelData, root.starsById)
+                hearts: Model.rowHeartLabel(modelData, root.heartsById)
                 selected: root.selectedIndex === globalIndex
                 showSeparator: index < root.builtinRows.length - 1 // qmllint disable unqualified
                 foreground: root.foreground
@@ -1946,68 +2038,6 @@ Item {
               PanelToolTip {
                 visible: unverifiedInstallSwitch.containsMouse
                 text: store.allowUnverifiedInstalls ? "Unverified listings can be installed" : "Only verified listings can be installed"
-                fontFamily: root.fontFamily
-              }
-            }
-          }
-
-          // Which window this panel opens as. The window is chosen at open
-          // time, so the switch is a decision about the next one.
-          Rectangle {
-            width: parent.width
-            height: Math.max(tiledPanelText.implicitHeight, tiledPanelSwitch.implicitHeight) + Style.space(12) * 2
-            radius: Style.cornerRadius
-            color: Style.normalFill
-            border.width: 1
-            border.color: Qt.alpha(root.secondaryForeground, 0.35)
-
-            Column {
-              id: tiledPanelText
-              anchors.left: parent.left
-              anchors.leftMargin: Style.space(12)
-              anchors.right: tiledPanelSwitch.left
-              anchors.rightMargin: Style.space(16)
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(4)
-
-              Text {
-                // Never rich text: AutoText would fetch what a crafted string points at.
-                textFormat: Text.PlainText
-                width: parent.width
-                text: "Open expanded panel as a tiled window"
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                wrapMode: Text.WordWrap
-              }
-
-              Text {
-                // Never rich text: AutoText would fetch what a crafted string points at.
-                textFormat: Text.PlainText
-                width: parent.width
-                text: "Off: the expanded panel is an overlay above everything, closed by Esc or a click outside. "
-                  + "On: it opens as a regular window that Hyprland tiles in the current workspace, so it can sit beside a terminal. Takes effect on the next open."
-                color: root.secondaryForeground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-            }
-
-            ToggleSwitch {
-              id: tiledPanelSwitch
-              anchors.right: parent.right
-              anchors.rightMargin: Style.space(12)
-              anchors.verticalCenter: parent.verticalCenter
-              checked: store.tiledExpandedPanel
-              interactive: true
-              busy: root.busy
-              foreground: root.foreground
-              onToggled: store.setTiledExpandedPanel(!store.tiledExpandedPanel)
-
-              PanelToolTip {
-                visible: tiledPanelSwitch.containsMouse
-                text: store.tiledExpandedPanel ? "The expanded panel opens as a tiled window" : "The expanded panel opens as an overlay"
                 fontFamily: root.fontFamily
               }
             }
