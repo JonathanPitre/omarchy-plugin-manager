@@ -204,6 +204,27 @@ function tiledExpandedPanel(settings) {
     && settings.tiledExpandedPanel === true
 }
 
+// How the manager opens from the bar, and where its corner button sends it
+// next: the popup, the overlay, or a plain window the compositor tiles. One
+// value instead of a switch, so the button that changes it is also the place
+// it shows. An entry written before this existed carries only the tiled
+// switch, which meant "the full panel is a window", so it reads as window.
+var OPEN_AS_MODES = ["popup", "overlay", "window"]
+
+function openAs(settings) {
+  if (settings && hasOwnKey(settings, "openAs") && OPEN_AS_MODES.indexOf(settings.openAs) >= 0)
+    return settings.openAs
+  return tiledExpandedPanel(settings) ? "window" : "popup"
+}
+
+// The entry to write back with the mode set. The tiled switch it replaces is
+// dropped, so the file never says two things about the same choice.
+function withOpenAs(entry, mode) {
+  var out = withSelfSetting(entry, "tiledExpandedPanel", false)
+  out.openAs = OPEN_AS_MODES.indexOf(mode) >= 0 ? mode : "popup"
+  return out
+}
+
 // This plugin's own entry, found in shell.json itself rather than in what the
 // loader printed. The expanded window has to know which kind of window to open
 // before the store's first load has run, so it reads the file and asks here.
@@ -1013,6 +1034,7 @@ function barSectionMovePlan(row, raw, section) {
 function actionVerb(kind) {
   if (kind === "install") return "Install"
   if (kind === "update") return "Update"
+  if (kind === "bulk-update") return "Update"
   if (kind === "remove") return "Remove"
   if (kind === "enable") return "Enable"
   if (kind === "disable") return "Disable"
@@ -1169,23 +1191,42 @@ function verifiedIdSet(entries) {
   return set
 }
 
-// GitHub stars per plugin id, from the marketplace catalog, so an installed
-// row can wear the count its listing has. Same null-prototype set discipline
-// as verifiedIdSet: ids are untrusted property names.
-function catalogStarsById(entries) {
-  var stars = Object.create(null)
+// One catalog count per plugin id, from the marketplace catalog, so an
+// installed row can wear the counts its listing has. Same null-prototype set
+// discipline as verifiedIdSet: ids are untrusted property names. Unknown
+// counts are left out; a real zero is kept.
+function catalogCountById(entries, field) {
+  var counts = Object.create(null)
   for (var i = 0; i < (entries || []).length; i++) {
     var entry = entries[i]
     if (!entry || !entry.id) continue
-    var count = catalogCount(entry.stars)
-    if (count !== null) stars[String(entry.id)] = count
+    var count = catalogCount(entry[field])
+    if (count !== null) counts[String(entry.id)] = count
   }
-  return stars
+  return counts
+}
+
+function rowCountLabel(row, countsById) {
+  if (!row || !row.id || !hasOwnKey(countsById, row.id)) return ""
+  return starLabel(countsById[String(row.id)])
+}
+
+// GitHub stars per plugin id.
+function catalogStarsById(entries) {
+  return catalogCountById(entries, "stars")
 }
 
 function rowStarLabel(row, starsById) {
-  if (!row || !row.id || !hasOwnKey(starsById, row.id)) return ""
-  return starLabel(starsById[String(row.id)])
+  return rowCountLabel(row, starsById)
+}
+
+// Marketplace hearts per plugin id.
+function catalogHeartsById(entries) {
+  return catalogCountById(entries, "marketplaceHearts")
+}
+
+function rowHeartLabel(row, heartsById) {
+  return rowCountLabel(row, heartsById)
 }
 
 function isVerified(row, verifiedIds) {
@@ -1582,12 +1623,13 @@ function installedFilterHints(filters, options) {
 // The other end of the same bar: what Enter, Delete, and / do on this tab.
 // Refresh and the tab switch have buttons in the header and Escape closes
 // every panel, so none of those earn a column here.
-function actionHints(browsing) {
+function actionHints(browsing, bulkUpdateAvailable) {
   if (browsing) return [
     { key: "↵", text: "DETAILS", active: false },
     { key: "/", text: "SEARCH", active: false }
   ]
   return [
+    { key: "u", text: "UPDATE ALL", active: bulkUpdateAvailable === true },
     { key: "↵", text: "UPDATE", active: false },
     { key: "⌦", text: "REMOVE", active: false },
     { key: "/", text: "SEARCH", active: false }
@@ -1864,6 +1906,16 @@ function expandedTabFromPayload(json) {
   try { parsed = JSON.parse(String(json || "")) } catch (e) { return "installed" }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "installed"
   return parsed.tab === "browse" ? "browse" : "installed"
+}
+
+// The host a summon asked for. The corner button names it because the
+// setting it just wrote may not have reached the file yet; anything else
+// leaves the choice to the setting.
+function expandedModeFromPayload(json) {
+  var parsed = null
+  try { parsed = JSON.parse(String(json || "")) } catch (e) { return "" }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return ""
+  return parsed.mode === "overlay" || parsed.mode === "window" ? parsed.mode : ""
 }
 
 // Only the read-only arrangement preview is addressable through IPC.
@@ -2787,6 +2839,58 @@ function countBehind(rows) {
   for (var i = 0; i < (rows || []).length; i++)
     if (rows[i] && rows[i].behind === true) total++
   return total
+}
+
+// ---- Bulk update ----------------------------------------------------------
+//
+// The rows one "Update all" would install, in list order. Only rows with an
+// installable request: a verified snapshot when one differs, otherwise the
+// observed unreviewed tip when the setting allows it. Ahead-of-verified and
+// non-GitHub origins are excluded here; they stay counted by countBehind.
+function bulkUpdateCandidates(rows) {
+  var out = []
+  for (var i = 0; i < (rows || []).length; i++) {
+    var row = rows[i]
+    if (!row || String(row.id || "") === "") continue
+    var name = plainText(row.name || row.id)
+    if (row.pinnedEligible === true) {
+      var verified = normalizeGitObjectId(row.verifiedTargetSha)
+      if (!/^[0-9a-f]{40}$/.test(verified)) continue
+      out.push({ id: String(row.id), name: name, kind: "verified", targetSha: verified,
+        display: name + " — verified snapshot " + shortSha(verified) })
+    } else if (row.unverifiedEligible === true) {
+      var tip = normalizeGitObjectId(row.remoteSha)
+      if (!/^[0-9a-f]{40}$/.test(tip)) continue
+      out.push({ id: String(row.id), name: name, kind: "unverified", targetSha: tip,
+        display: name + " — unreviewed commit " + shortSha(tip) })
+    }
+  }
+  return out
+}
+
+// One line per candidate, in list order. Plain text only; names are already
+// sanitized by bulkUpdateCandidates.
+function bulkUpdateConfirmMessage(candidates) {
+  var list = candidates || []
+  var lines = []
+  for (var i = 0; i < list.length; i++) lines.push(String(list[i].display || ""))
+  return "Update " + list.length + (list.length === 1 ? " plugin" : " plugins")
+    + " to exactly these commits?\n\n" + lines.join("\n") + "\n\n"
+    + "Verified snapshots are rechecked before publication. "
+    + "Unreviewed commits install exactly as listed, nothing newer."
+}
+
+// "Updated x, skipped y (name: reason; …)". Names and reasons are already
+// plain text when the store builds them.
+function bulkUpdateSummary(results) {
+  var updated = 0
+  var skipped = []
+  for (var i = 0; i < (results || []).length; i++) {
+    if (results[i] && results[i].ok === true) updated++
+    else if (results[i]) skipped.push(String(results[i].name || "") + ": " + String(results[i].reason || "skipped"))
+  }
+  var summary = "Updated " + updated + ", skipped " + skipped.length
+  return skipped.length > 0 ? summary + " (" + skipped.join("; ") + ")" : summary
 }
 
 // ---- Update data: fixed helper protocol, never a source of commands --------

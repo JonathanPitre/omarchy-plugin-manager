@@ -23,6 +23,22 @@ NEW_REPO = "https://github.com/acme/newplugin"
 NEW_ID = "acme.newplugin"
 
 
+class BulkFixtureUpdater:
+    home = None
+    state = None
+    reason = ""
+    backup = ""
+
+    def open_update_lock(self):
+        pass
+
+    def catalog_bytes(self):
+        return b'{"plugins":[]}'
+
+    def authorize_update(self, prepared, catalog):
+        pass
+
+
 class TransactionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -181,6 +197,748 @@ class TransactionTests(unittest.TestCase):
         calls.clear()
         updater.notify(u.request_value(self.request), result)
         self.assertEqual(calls[0][3], "Pinned plugin update")
+
+    def test_bulk_update_can_defer_shell_reload_until_the_queue_finishes(self):
+        # Raw requests may not defer the reload; only the bulk queue marks
+        # normalized items after validation.
+        with self.assertRaises(u.Refused):
+            u.request_value({**self.request, "deferReload": True})
+        with self.assertRaises(u.Refused):
+            u.request_value({**self.install, "deferReload": True})
+        with self.assertRaises(u.Refused):
+            u.request_value({**self.request, "deferReload": "true"})
+        request = u.bulk_request_value({"schemaVersion": 1,
+                                        "bulkUpdates": [self.request]})["bulkUpdates"][0]
+        self.assertTrue(request["deferReload"])
+        result = self.updater().execute(request)
+        self.assertEqual(result["status"], "updated")
+        self.assertFalse(self.reloaded)
+        journaled = json.loads((Path(result["backup"]).parent / "request.json").read_text())
+        self.assertNotIn("deferReload", journaled)
+        self.assertEqual(journaled, self.request)
+
+    @patch.object(u.Updater, "notify")
+    def test_completed_bulk_transaction_archives_at_capacity_and_cleans_up(self, _notify):
+        # The journal carries no runtime-only flag, so the archive and
+        # cleanup paths that re-validate it accept bulk history.
+        bulk = u.bulk_request_value({"schemaVersion": 1,
+                                     "bulkUpdates": [self.request]})["bulkUpdates"]
+        result = u.execute_bulk_updates(bulk, lambda: self.updater())
+        self.assertEqual(result["status"], "bulk complete")
+        self.assertEqual([item["status"] for item in result["updates"]], ["updated"])
+        state = self.home / ".config/omarchy/plugin-manager-updates"
+        names = [p.name for p in state.iterdir()]
+        self.assertEqual(len(names), 1)
+        name = names[0]
+        for number in range(31):
+            (state / ("pending-%d" % number)).mkdir(mode=0o700)
+        updater = self.updater()
+        try:
+            updater.open_paths("acme.plugin")
+        finally:
+            for fd in reversed(updater.fds):
+                os.close(fd)
+            updater.fds.clear()
+        self.assertFalse((state / name).exists())
+        self.assertTrue((self.home / ".config/omarchy/plugin-manager-updates-archive" / name).exists())
+        result = u.cleanup_completed(self.updater())
+        self.assertEqual(result["status"], "complete")
+
+    def test_bulk_summary_is_consumed_once_then_gone(self):
+        home = str(self.home)
+        self.assertEqual(u.consume_bulk_summary(home), {})
+        result = {"status": "bulk complete", "updates": [{"id": "acme.plugin", "status": "updated", "reason": ""}],
+                  "rescan": "complete", "nonce": "1-2"}
+        u.write_bulk_summary(home, result)
+        path = self.home / ".config/omarchy/plugin-manager-bulk-summary.json"
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode) & 0o077, 0)
+        self.assertEqual(u.consume_bulk_summary(home),
+                         {"schemaVersion": 1, "nonce": "1-2", "status": "bulk complete",
+                          "updates": result["updates"], "rescan": "complete"})
+        self.assertEqual(u.consume_bulk_summary(home), {})
+        path.write_text("{oops")
+        self.assertEqual(u.consume_bulk_summary(home), {})
+        self.assertFalse(path.exists())
+
+    def test_two_real_bulk_updates_publish_with_backups_and_exclude_cleanup_until_summary(self):
+        self.git("clone", "--no-hardlinks", "-q", str(self.new_remote), str(self.new_plugin))
+        self.git("-C", str(self.new_plugin), "checkout", "-q", "--detach", self.new_base)
+        self.git("-C", str(self.new_plugin), "remote", "set-url", "origin", NEW_REPO)
+        requests = u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [self.request,
+            dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                 verifiedCommit=self.new_target, expectedLocalHead=self.new_base)]})["bulkUpdates"]
+        notifications = []
+        summary = u.write_bulk_summary
+
+        def assert_cleanup_excluded():
+            with self.assertRaises(BlockingIOError), u.CleanupLock(self.updater()):
+                self.fail("cleanup admitted during a batch")
+
+        def notify(updater, request, result):
+            self.assertTrue(self.reloaded)
+            self.assertTrue((self.home / ".config/omarchy" / u.BULK_SUMMARY_NAME).exists())
+            self.assertEqual(self.git("-C", str(self.plugin), "rev-parse", "HEAD"), self.target)
+            self.assertEqual(self.git("-C", str(self.new_plugin), "rev-parse", "HEAD"), self.new_target)
+            self.assertIn("backup", result)
+            notifications.append(request["id"])
+
+        def write_summary(home, result):
+            assert_cleanup_excluded()
+            summary(home, result)
+
+        with patch.object(u.Updater, "notify", notify), patch.object(u, "write_bulk_summary", write_summary):
+            result = u.execute_bulk_updates(requests, self.updater)
+        self.assertEqual([item["status"] for item in result["updates"]], ["updated", "updated"])
+        self.assertEqual(notifications, ["acme.plugin", NEW_ID])
+        state = self.home / ".config/omarchy/plugin-manager-updates"
+        backups = {}
+        for transaction in state.iterdir():
+            request = json.loads((transaction / "request.json").read_text())
+            backups[request["id"]] = self.git("-C", str(transaction / "checkout"), "rev-parse", "HEAD")
+        self.assertEqual(backups, {"acme.plugin": self.base, NEW_ID: self.new_base})
+        with u.CleanupLock(self.updater()):
+            pass
+        self.assertEqual(u.cleanup_completed(self.updater())["status"], "complete")
+
+    def assert_late_update_refused(self, mutate, reason):
+        updater = self.updater()
+        try:
+            prepared = updater.prepare_update(u.request_value(self.request))
+            mutate()
+            with self.assertRaisesRegex(u.Refused, reason):
+                updater.publish_update(prepared)
+            self.assertFalse(updater.published)
+        finally:
+            updater.close()
+
+    def two_bulk_requests(self):
+        self.git("clone", "--no-hardlinks", "-q", str(self.new_remote), str(self.new_plugin))
+        self.git("-C", str(self.new_plugin), "checkout", "-q", "--detach", self.new_base)
+        self.git("-C", str(self.new_plugin), "remote", "set-url", "origin", NEW_REPO)
+        return u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [self.request,
+            dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                 verifiedCommit=self.new_target, expectedLocalHead=self.new_base)]})["bulkUpdates"]
+
+    @patch.object(u.Updater, "notify")
+    def test_bulk_catalog_delay_never_separates_real_exchanges(self, _notify):
+        requests = self.two_bulk_requests()
+        exchanges = []
+        catalog_after_exchange = []
+        fixture = type(self.updater())
+
+        class DelayedUpdater(fixture):
+            def catalog_bytes(worker):
+                catalog_after_exchange.append(bool(exchanges))
+                time.sleep(0.25)
+                return super().catalog_bytes()
+
+            def exchange(worker, plugin_id):
+                super().exchange(plugin_id)
+                exchanges.append(time.monotonic())
+
+        result = u.execute_bulk_updates(requests, lambda: DelayedUpdater(home=str(self.home)))
+        self.assertEqual([item["status"] for item in result["updates"]], ["updated", "updated"])
+        self.assertEqual(self.git("-C", str(self.plugin), "rev-parse", "HEAD"), self.target)
+        self.assertEqual(self.git("-C", str(self.new_plugin), "rev-parse", "HEAD"), self.new_target)
+        self.assertEqual(len(exchanges), 2)
+        gap = exchanges[1] - exchanges[0]
+        print("250ms catalog delay; real exchange gap %.6fs; catalog after exchange %s" %
+              (gap, catalog_after_exchange), flush=True)
+        self.assertFalse(any(catalog_after_exchange), "network work ran between real exchanges")
+
+    @patch.object(u.Updater, "notify")
+    def test_bulk_final_catalog_refuses_revocation_during_later_preparation(self, _notify):
+        requests = self.two_bulk_requests()
+        fixture = type(self.updater())
+        outer = self
+
+        class RevokingUpdater(fixture):
+            def fetch(worker, stage, sha):
+                super().fetch(stage, sha)
+                if sha == outer.new_target:
+                    outer.catalog["plugins"][0]["verificationStatus"] = "unverified"
+
+        result = u.execute_bulk_updates(requests, lambda: RevokingUpdater(home=str(self.home)))
+        self.assertEqual([item["status"] for item in result["updates"]],
+                         ["unchanged; update refused", "updated"])
+        self.assertIn("not verified", result["updates"][0]["reason"])
+        self.assertEqual(self.git("-C", str(self.plugin), "rev-parse", "HEAD"), self.base)
+        state = self.home / ".config/omarchy/plugin-manager-updates"
+        refused = [json.loads((transaction / "refused.json").read_text())
+                   for transaction in state.iterdir() if (transaction / "refused.json").exists()]
+        self.assertEqual(refused, [{"reason": result["updates"][0]["reason"]}])
+
+    def test_competing_refused_bulk_preserves_the_lock_owners_summary(self):
+        requests = u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [self.request]})["bulkUpdates"]
+        observed = []
+        summary = self.home / ".config/omarchy" / u.BULK_SUMMARY_NAME
+
+        def notify(worker, request, notification):
+            before = json.loads(summary.read_text())
+            read_end, write_end = os.pipe()
+            pid = os.fork()
+            if pid == 0:
+                os.close(read_end)
+                result = u.execute_bulk_updates(requests, self.updater)
+                os.write(write_end, json.dumps(result).encode())
+                os.close(write_end)
+                os._exit(0)
+            os.close(write_end)
+            with os.fdopen(read_end) as stream:
+                competing = json.load(stream)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(status, 0)
+            observed.append((before, competing, json.loads(summary.read_text())))
+
+        def quiet_refusal(worker, request, result):
+            if result["status"] == "updated":
+                notify(worker, request, result)
+
+        with patch.object(u.Updater, "notify", quiet_refusal):
+            result = u.execute_bulk_updates(requests, self.updater)
+        self.assertEqual(result["updates"][0]["status"], "updated")
+        self.assertEqual(len(observed), 1)
+        before, competing, after = observed[0]
+        self.assertEqual(competing["updates"][0]["reason"], "Another pinned update is running")
+        print("Competing bulk summary nonces; owner %s; refused %s; stored %s" %
+              (result["nonce"], competing["nonce"], after["nonce"]), flush=True)
+        self.assertEqual(before["nonce"], result["nonce"])
+        self.assertEqual(after, before, "the refused worker overwrote the owner's recovery summary")
+
+    def assert_bulk_late_update_refused(self, mutate, reason):
+        requests = self.two_bulk_requests()
+        fixture = type(self.updater())
+
+        class EditingUpdater(fixture):
+            def exchange(worker, plugin_id):
+                super().exchange(plugin_id)
+                if plugin_id == "acme.plugin":
+                    mutate()
+
+        with patch.object(u.Updater, "notify"):
+            result = u.execute_bulk_updates(requests, lambda: EditingUpdater(home=str(self.home)))
+        self.assertEqual([item["status"] for item in result["updates"]],
+                         ["updated", "unchanged; update refused"])
+        self.assertIn(reason, result["updates"][1]["reason"])
+
+    def test_bulk_publication_rechecks_local_files_after_the_first_exchange(self):
+        self.assert_bulk_late_update_refused(
+            lambda: (self.new_plugin / "BarWidget.qml").write_text("local edit"), "Dirty")
+        self.assertEqual((self.new_plugin / "BarWidget.qml").read_text(), "local edit")
+
+    def test_bulk_publication_rechecks_head_after_the_first_exchange(self):
+        self.assert_bulk_late_update_refused(
+            lambda: (self.new_plugin / ".git/HEAD").write_text(self.new_tip + "\n"), "HEAD changed")
+        self.assertEqual((self.new_plugin / ".git/HEAD").read_text(), self.new_tip + "\n")
+
+    def test_bulk_publication_rechecks_origin_after_the_first_exchange(self):
+        self.assert_bulk_late_update_refused(
+            lambda: self.git("-C", str(self.new_plugin), "remote", "set-url", "origin", REPO), "origin changed")
+        self.assertEqual(self.git("-C", str(self.new_plugin), "remote", "get-url", "origin"), REPO)
+
+    def test_bulk_publication_rechecks_anchors_after_the_first_exchange(self):
+        def replace():
+            self.new_plugin.rename(self.new_plugin.with_suffix(".saved"))
+            self.new_plugin.mkdir()
+            (self.new_plugin / "keep").write_text("replacement")
+
+        self.assert_bulk_late_update_refused(replace, "Directory identity changed")
+        self.assertEqual((self.new_plugin / "keep").read_text(), "replacement")
+
+    def test_cleanup_lock_refuses_bulk_without_losing_its_notification(self):
+        state = self.home / ".config/omarchy/plugin-manager-updates"
+        state.mkdir(mode=0o700)
+        notifications = []
+
+        def notify(updater, request, result):
+            notifications.append((result, (state.parent / u.BULK_SUMMARY_NAME).exists()))
+
+        requests = u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [self.request]})["bulkUpdates"]
+        with u.CleanupLock(self.updater()), patch.object(u.Updater, "notify", notify):
+            result = u.execute_bulk_updates(requests, self.updater)
+        self.assertEqual(result["updates"][0]["reason"], "Another pinned update is running")
+        self.assertEqual(notifications, [({"status": "unchanged; update refused",
+                                          "reason": "Another pinned update is running", "backup": ""}, False)])
+        self.assertEqual(list(state.iterdir()), [])
+        self.assertEqual(self.git("-C", str(self.plugin), "rev-parse", "HEAD"), self.base)
+
+    def test_publication_refuses_late_local_edit(self):
+        self.assert_late_update_refused(lambda: (self.plugin / "Main.qml").write_text("local edit"), "Dirty")
+        self.assertEqual((self.plugin / "Main.qml").read_text(), "local edit")
+
+    def test_publication_refuses_late_head_change(self):
+        self.assert_late_update_refused(lambda: (self.plugin / ".git/HEAD").write_text(self.tip + "\n"), "HEAD changed")
+        self.assertEqual((self.plugin / ".git/HEAD").read_text().strip(), self.tip)
+
+    def test_publication_refuses_late_origin_change(self):
+        self.assert_late_update_refused(
+            lambda: self.git("-C", str(self.plugin), "remote", "set-url", "origin", NEW_REPO), "origin changed")
+        self.assertEqual(self.git("-C", str(self.plugin), "remote", "get-url", "origin"), NEW_REPO)
+
+    def test_publication_refuses_replaced_directory(self):
+        def replace():
+            self.plugin.rename(self.plugin.with_suffix(".saved"))
+            self.plugin.mkdir()
+            (self.plugin / "keep").write_text("replacement")
+        self.assert_late_update_refused(replace, "Directory identity changed")
+        self.assertEqual((self.plugin / "keep").read_text(), "replacement")
+
+    def test_publication_refuses_revoked_authorization(self):
+        self.assert_late_update_refused(
+            lambda: self.catalog["plugins"][0].update(verificationStatus="unverified"), "not verified")
+        self.assertEqual(self.git("-C", str(self.plugin), "rev-parse", "HEAD"), self.base)
+
+    def test_bulk_signal_during_publication_applies_checked_update_and_rescans(self):
+        class SignalledUpdater(type(self.updater())):
+            def checkpoint(self, phase):
+                if phase == "before-exchange":
+                    os.kill(os.getpid(), signal.SIGTERM)
+                super().checkpoint(phase)
+
+            def notify(self, request, result):
+                pass
+
+        request = u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [self.request]})
+        output = io.TextIOWrapper(io.BytesIO())
+        with patch.object(u.sys, "stdout", output):
+            u.launch(request, lambda: SignalledUpdater(home=str(self.home)))
+        result = json.loads(output.buffer.getvalue())
+        self.assertEqual([item["status"] for item in result["updates"]], ["updated"])
+        self.assertEqual(result["rescan"], "complete")
+        self.assertEqual(self.git("-C", str(self.plugin), "rev-parse", "HEAD"), self.target)
+
+    def test_summary_reader_during_write_sees_complete_previous_outcome(self):
+        old = {"nonce": "old", "updates": [], "rescan": "not needed"}
+        new = {"nonce": "new", "updates": [], "rescan": "not needed"}
+        u.write_bulk_summary(str(self.home), old)
+        write = os.write
+        observed = []
+
+        def interleaved_write(fd, data):
+            if not observed:
+                observed.append(u.consume_bulk_summary(str(self.home)))
+            return write(fd, data)
+
+        with patch.object(u.os, "write", interleaved_write):
+            u.write_bulk_summary(str(self.home), new)
+        self.assertEqual(observed[0].get("nonce"), "old")
+        self.assertEqual(u.consume_bulk_summary(str(self.home)).get("nonce"), "new")
+
+    def test_failed_summary_write_preserves_previous_outcome_and_removes_temp(self):
+        result = {"nonce": "old", "updates": [], "rescan": "not needed"}
+        u.write_bulk_summary(str(self.home), result)
+        root = self.home / ".config/omarchy"
+        before = set(root.iterdir())
+        with patch.object(u.os, "write", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                u.write_bulk_summary(str(self.home), {**result, "nonce": "new"})
+        self.assertEqual(set(root.iterdir()), before)
+        self.assertEqual(u.consume_bulk_summary(str(self.home)).get("nonce"), "old")
+
+    def test_claimed_summary_reader_cannot_delete_newer_outcome(self):
+        old = {"nonce": "old", "updates": [], "rescan": "not needed"}
+        u.write_bulk_summary(str(self.home), old)
+        read = u.read_file
+        published = []
+
+        def interleaved_read(parent, name, cap, **kwargs):
+            result = read(parent, name, cap, **kwargs)
+            if not published:
+                published.append(True)
+                u.write_bulk_summary(str(self.home), {**old, "nonce": "new"})
+            return result
+
+        with patch.object(u, "read_file", interleaved_read):
+            self.assertEqual(u.consume_bulk_summary(str(self.home)).get("nonce"), "old")
+        self.assertEqual(u.consume_bulk_summary(str(self.home)).get("nonce"), "new")
+
+    def test_live_summary_drain_preserves_another_batches_report(self):
+        result = {"nonce": "2-2", "updates": [], "rescan": "complete"}
+        u.write_bulk_summary(str(self.home), result)
+        self.assertEqual(u.consume_bulk_summary(str(self.home), "1-1"), {})
+        self.assertEqual(u.consume_bulk_summary(str(self.home)).get("nonce"), "2-2")
+        u.write_bulk_summary(str(self.home), {**result, "nonce": "1-1"})
+        self.assertEqual(u.consume_bulk_summary(str(self.home), "1-1"), {})
+        self.assertEqual(u.consume_bulk_summary(str(self.home)), {})
+
+    def test_live_summary_drain_preserves_the_report_without_no_replace_support(self):
+        result = {"nonce": "2-2", "updates": [], "rescan": "complete"}
+        u.write_bulk_summary(str(self.home), result)
+        with patch.object(u, "NOREPLACE", None):
+            self.assertEqual(u.consume_bulk_summary(str(self.home), "1-1"), {})
+        self.assertEqual(u.consume_bulk_summary(str(self.home)).get("nonce"), "2-2")
+
+    def test_concurrent_summary_consumers_do_not_replay_a_live_report(self):
+        home = str(self.home)
+        read = u.read_file
+        flock = u.fcntl.flock
+        for newer in (False, True):
+            for recovery in (False, True):
+                with self.subTest(newer=newer, recovery=recovery):
+                    result = {"nonce": "2-2", "updates": [], "rescan": "complete"}
+                    u.write_bulk_summary(home, result)
+                    expected_nonce = "3-3" if newer else "2-2"
+                    start_read, start_write = os.pipe()
+                    event_read, event_write = os.pipe()
+                    result_read, result_write = os.pipe()
+                    child = os.fork()
+                    if child == 0:
+                        os.close(start_write)
+                        os.close(event_read)
+                        os.close(result_read)
+                        signal.alarm(10)
+                        try:
+                            os.read(start_read, 1)
+
+                            def observed_flock(fd, operation):
+                                try:
+                                    return flock(fd, operation | u.fcntl.LOCK_NB)
+                                except BlockingIOError:
+                                    os.write(event_write, b"W")
+                                    return flock(fd, operation)
+
+                            with patch.object(u.fcntl, "flock", observed_flock):
+                                consumed = u.consume_bulk_summary(
+                                    home, None if recovery else expected_nonce)
+                            os.write(event_write, b"D")
+                            os.write(result_write, json.dumps(consumed).encode())
+                            os._exit(0)
+                        except BaseException:
+                            os._exit(1)
+                    os.close(start_read)
+                    os.close(event_write)
+                    os.close(result_write)
+                    reaped = False
+                    try:
+                        def interleaved_read(parent, name, cap, **kwargs):
+                            value = read(parent, name, cap, **kwargs)
+                            if newer:
+                                u.write_bulk_summary(home, {**result, "nonce": expected_nonce})
+                            os.write(start_write, b"S")
+                            self.assertIn(os.read(event_read, 1), (b"W", b"D"))
+                            return value
+
+                        with patch.object(u, "read_file", interleaved_read):
+                            self.assertEqual(u.consume_bulk_summary(home, "1-1"), {})
+                        _, status = os.waitpid(child, 0)
+                        reaped = True
+                        self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+                        consumed = json.loads(os.read(result_read, u.MAX_BULK_SUMMARY))
+                        if recovery:
+                            self.assertEqual(consumed.get("nonce"), expected_nonce)
+                        else:
+                            self.assertEqual(consumed, {})
+                        self.assertEqual(u.consume_bulk_summary(home), {},
+                                         "a concurrent consumer left an already handled report for replay")
+                    finally:
+                        if not reaped:
+                            try:
+                                os.kill(child, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            os.waitpid(child, 0)
+                        for fd in (start_write, event_read, result_read):
+                            os.close(fd)
+
+    def test_live_summary_drain_cannot_replace_a_newer_report_when_restoring(self):
+        result = {"nonce": "2-2", "updates": [], "rescan": "complete"}
+        u.write_bulk_summary(str(self.home), result)
+        read = u.read_file
+        published = []
+
+        def interleaved_read(parent, name, cap, **kwargs):
+            value = read(parent, name, cap, **kwargs)
+            if not published:
+                published.append(True)
+                u.write_bulk_summary(str(self.home), {**result, "nonce": "3-3"})
+            return value
+
+        with patch.object(u, "read_file", interleaved_read):
+            self.assertEqual(u.consume_bulk_summary(str(self.home), "1-1"), {})
+        self.assertEqual(u.consume_bulk_summary(str(self.home)).get("nonce"), "3-3")
+
+    def test_live_summary_drain_cli_checks_the_nonce_and_preserves_unseen_reports(self):
+        result = {"nonce": "2-2", "updates": [], "rescan": "complete"}
+        u.write_bulk_summary(str(self.home), result)
+        entry = Path(SPEC.origin).read_text().split('if __name__ == "__main__":', 1)[1]
+        namespace = {**vars(u), "Updater": self.updater}
+        summary = self.home / ".config/omarchy" / u.BULK_SUMMARY_NAME
+        before = summary.read_bytes()
+        for nonce in ("../2-2", "2-2\n", "2-2;false", "1" * 65, "1-1", "2-2"):
+            with self.subTest(nonce=nonce):
+                output = io.StringIO()
+                with patch.object(sys, "argv", [SPEC.origin, "--drain-bulk-summary", nonce]), \
+                        patch.object(sys, "stdout", output):
+                    with self.assertRaises(SystemExit) as caught:
+                        exec(compile("if True:" + entry, SPEC.origin, "exec"), namespace)
+                self.assertEqual(caught.exception.code, 0)
+                self.assertEqual(output.getvalue(), "{}\n")
+                if nonce == "2-2":
+                    self.assertFalse(summary.exists())
+                else:
+                    self.assertEqual(summary.read_bytes(), before)
+
+    def test_live_summary_drain_restoration_does_not_block_a_new_summary_writer(self):
+        result = {"nonce": "2-2", "updates": [], "rescan": "complete"}
+        u.write_bulk_summary(str(self.home), result)
+        unlink = os.unlink
+        published = []
+
+        def interleaved_unlink(name, **kwargs):
+            if str(name).endswith(".claimed") and not published:
+                published.append(True)
+                u.write_bulk_summary(str(self.home), {**result, "nonce": "3-3"})
+            return unlink(name, **kwargs)
+
+        with patch.object(u.os, "unlink", interleaved_unlink):
+            self.assertEqual(u.consume_bulk_summary(str(self.home), "1-1"), {})
+        self.assertEqual(u.consume_bulk_summary(str(self.home)).get("nonce"), "3-3")
+
+    def test_detached_bulk_executor_finishes_bound_updates_after_publication_reload(self):
+        requests = [
+            dict(schemaVersion=1, id="acme.plugin", repository=REPO,
+                 verifiedCommit=self.target, expectedLocalHead=self.base),
+            dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                 unverifiedCommit=self.new_tip, expectedLocalHead=self.new_base),
+            dict(schemaVersion=1, id="acme.third", repository=REPO,
+                 verifiedCommit=self.target, expectedLocalHead=self.base),
+            dict(schemaVersion=1, id="acme.fourth", repository=REPO,
+                 verifiedCommit=self.target, expectedLocalHead=self.base),
+        ]
+        calls = []
+
+        class FixtureUpdater(BulkFixtureUpdater):
+            def __init__(self):
+                self.deadline = time.monotonic() + 100
+                self.cancelled = False
+
+            def prepare_update(self, request, update_lock=None):
+                calls.append((request["id"], request["deferReload"]))
+                if request["id"] in ("acme.third", "acme.fourth"):
+                    raise u.Refused("Target moved")
+                return request
+
+            def publish_update(self, request):
+                return {"status": "updated"}
+
+            def close(self):
+                pass
+
+            def notify(self, request, result):
+                if request["id"] in ("acme.plugin", NEW_ID):
+                    self.deadline = 0
+
+            def reload(self):
+                self.assert_fresh_deadline()
+                calls.append(("rescan", None))
+
+            def assert_fresh_deadline(self):
+                if self.deadline <= time.monotonic():
+                    raise u.Refused("Expired deadline")
+
+        result = u.execute_bulk_updates(u.bulk_request_value({"schemaVersion": 1,
+                                                              "bulkUpdates": requests})["bulkUpdates"], FixtureUpdater)
+        self.assertEqual(calls, [("acme.plugin", True), (NEW_ID, True), ("acme.third", True),
+                                 ("acme.fourth", True), ("rescan", None)])
+        self.assertEqual([item["status"] for item in result["updates"]],
+                         ["updated", "updated", "unchanged; update refused", "unchanged; update refused"])
+        self.assertEqual(result["rescan"], "complete")
+
+    def test_detached_bulk_executor_retries_failed_shell_rescan(self):
+        rescan_budget = (u.BULK_RESCAN_ATTEMPTS * u.BULK_RESCAN_TIMEOUT
+                         + (u.BULK_RESCAN_ATTEMPTS - 1) * u.BULK_RESCAN_PAUSE)
+        self.assertGreaterEqual(u.bulk_result_timeout(1) - u.UPDATE_RESULT_TIMEOUT, rescan_budget)
+        calls = []
+        failures = [1]
+
+        class FixtureUpdater(BulkFixtureUpdater):
+            def __init__(self):
+                self.deadline = time.monotonic() + 100
+                self.cancelled = False
+
+            def prepare_update(self, request, update_lock=None):
+                return request
+
+            def publish_update(self, request):
+                return {"status": "updated"}
+
+            def notify(self, request, result):
+                pass
+
+            def reload(self):
+                calls.append(self.deadline > time.monotonic())
+                if len(calls) <= failures[0]:
+                    raise u.Refused("Shell is still starting")
+
+            def close(self):
+                pass
+
+        result = u.execute_bulk_updates([u.request_value(self.request)], FixtureUpdater)
+        self.assertEqual(calls, [True, True])
+        self.assertEqual(result["rescan"], "complete")
+
+        calls.clear()
+        failures[0] = 3
+        result = u.execute_bulk_updates([u.request_value(self.request)], FixtureUpdater)
+        self.assertEqual(len(calls), u.BULK_RESCAN_ATTEMPTS)
+        self.assertEqual(result["rescan"], "failed")
+
+    def test_bulk_executor_stops_before_new_items_once_cancelled(self):
+        updates = u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [
+            self.request,
+            dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                 unverifiedCommit=self.new_tip, expectedLocalHead=self.new_base),
+        ]})["bulkUpdates"]
+        calls = []
+
+        class FixtureUpdater(BulkFixtureUpdater):
+            def prepare_update(self, request, update_lock=None):
+                calls.append(request["id"])
+                return request
+
+            def publish_update(self, request):
+                return {"status": "updated"}
+
+            def notify(self, request, result):
+                pass
+
+            def close(self):
+                pass
+
+        result = u.execute_bulk_updates(updates, FixtureUpdater, stop={"cancelled": True})
+        self.assertEqual(calls, [])
+        self.assertEqual([(item["id"], item["status"], item["reason"]) for item in result["updates"]],
+                         [(updates[0]["id"], "unchanged; update refused", "Stopped: cancelled"),
+                          (updates[1]["id"], "unchanged; update refused", "Stopped: cancelled")])
+
+        stop = {"cancelled": False}
+
+        class FlippingUpdater(FixtureUpdater):
+            def prepare_update(self, request, update_lock=None):
+                calls.append(request["id"])
+                stop["cancelled"] = True
+                self.cancelled = True
+                return request
+
+            def publish_update(self, request):
+                u.require(not self.cancelled, "Prepared update inherited cancellation")
+                return {"status": "updated"}
+
+            def reload(self):
+                pass
+
+        result = u.execute_bulk_updates(updates, FlippingUpdater, stop=stop)
+        self.assertEqual(calls, [updates[0]["id"]])
+        self.assertEqual([(item["id"], item["status"], item["reason"]) for item in result["updates"]],
+                         [(updates[0]["id"], "updated", ""),
+                          (updates[1]["id"], "unchanged; update refused", "Stopped: cancelled")])
+
+    def test_bulk_executor_stops_only_on_the_exact_capacity_reason(self):
+        updates = u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [
+            self.request,
+            dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                 unverifiedCommit=self.new_tip, expectedLocalHead=self.new_base),
+        ]})["bulkUpdates"]
+        calls = []
+        reasons = {}
+
+        fail_prepare = [True]
+
+        class FixtureUpdater(BulkFixtureUpdater):
+            def prepare_update(self, request, update_lock=None):
+                calls.append(request["id"])
+                if fail_prepare[0]:
+                    raise u.Refused(reasons[request["id"]])
+                return request
+
+            def publish_update(self, request):
+                return {"status": "unchanged; update refused", "reason": reasons[request["id"]]}
+
+            def notify(self, request, result):
+                pass
+
+            def close(self):
+                pass
+
+        reasons.update({updates[0]["id"]: u.CAPACITY_REASON, updates[1]["id"]: "Target moved"})
+        result = u.execute_bulk_updates(updates, FixtureUpdater)
+        self.assertEqual(calls, [updates[0]["id"]])
+        self.assertEqual([(item["id"], item["status"], item["reason"]) for item in result["updates"]],
+                         [(updates[0]["id"], "unchanged; update refused", u.CAPACITY_REASON),
+                          (updates[1]["id"], "unchanged; update refused", "Stopped: transaction limit")])
+
+        calls.clear()
+        fail_prepare[0] = False
+        reasons.update({updates[0]["id"]: "Transaction limit: review x", updates[1]["id"]: "Target moved"})
+        result = u.execute_bulk_updates(updates, FixtureUpdater)
+        self.assertEqual(calls, [updates[0]["id"], updates[1]["id"]],
+                                "a near-miss reason must not stop the batch")
+        self.assertNotIn("Stopped: transaction limit",
+                         [item["reason"] for item in result["updates"]])
+
+    def test_bulk_executor_vets_every_item_before_any_exchange(self):
+        updates = u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [
+            self.request,
+            dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                 unverifiedCommit=self.new_tip, expectedLocalHead=self.new_base),
+            dict(schemaVersion=1, id="acme.third", repository=REPO,
+                 verifiedCommit=self.target, expectedLocalHead=self.base),
+        ]})["bulkUpdates"]
+        calls = []
+
+        class FixtureUpdater(BulkFixtureUpdater):
+            def prepare_update(self, request, update_lock=None):
+                calls.append(("vet", request["id"]))
+                if request["id"] == "acme.third":
+                    raise u.Refused("Target moved")
+                return request
+
+            def publish_update(self, request):
+                calls.append(("exchange", request["id"]))
+                return {"status": "updated"}
+
+            def notify(self, request, result):
+                calls.append(("notify", request["id"], result.copy()))
+
+            def close(self):
+                pass
+
+        result = u.execute_bulk_updates(updates, FixtureUpdater)
+        vets = [call for call in calls if call[0] == "vet"]
+        exchanges = [call for call in calls if call[0] == "exchange"]
+        self.assertEqual([call[1] for call in vets],
+                         [updates[0]["id"], updates[1]["id"], updates[2]["id"]])
+        self.assertEqual([call[1] for call in exchanges],
+                         [updates[0]["id"], updates[1]["id"]])
+        self.assertLess(max(calls.index(call) for call in vets),
+                        min(calls.index(call) for call in exchanges))
+        notifications = [call for call in calls if call[0] == "notify"]
+        self.assertEqual(len(notifications), 3)
+        self.assertEqual(notifications[0][2], {"status": "unchanged; update refused",
+                                             "reason": "Target moved", "backup": ""})
+        self.assertLess(max(calls.index(call) for call in exchanges),
+                        min(calls.index(call) for call in notifications))
+        self.assertEqual([(item["id"], item["status"]) for item in result["updates"]],
+                         [(updates[0]["id"], "updated"),
+                          (updates[1]["id"], "updated"),
+                          (updates[2]["id"], "unchanged; update refused")])
+
+    def test_bulk_request_binds_unique_updates_and_rejects_installs(self):
+        requests = u.bulk_request_value({"schemaVersion": 1,
+            "bulkUpdates": [self.request, dict(schemaVersion=1, id=NEW_ID, repository=NEW_REPO,
+                unverifiedCommit=self.new_tip, expectedLocalHead=self.new_base)]})
+        self.assertEqual([item["id"] for item in requests["bulkUpdates"]], ["acme.plugin", NEW_ID])
+        self.assertTrue(all(item["deferReload"] for item in requests["bulkUpdates"]))
+        with self.assertRaises(u.Refused):
+            u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [self.request, self.request]})
+        with self.assertRaises(u.Refused):
+            u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": [self.install]})
+        with self.assertRaises(u.Refused):
+            u.bulk_request_value({"schemaVersion": 1, "bulkUpdates": []})
+        many = [dict(schemaVersion=1, id=f"acme.plugin-{index}", repository=REPO,
+                     verifiedCommit=self.target, expectedLocalHead=self.base) for index in range(40)]
+        self.assertEqual(len(u.bulk_request_value({"schemaVersion": 1,
+                                                    "bulkUpdates": many})["bulkUpdates"]), 40)
 
     def test_unverified_request_keeps_every_other_refusal(self):
         # A non-fast-forward target refuses exactly as a verified one would.
@@ -1510,6 +2268,22 @@ class ArchivalTests(unittest.TestCase):
         self.assertIn("~/.config/omarchy/plugin-manager-updates", reason)
         self.assertIn("README", reason)
         self.assertLess(len(reason), 200)
+
+    def test_renumbered_device_histories_still_archive_at_capacity(self):
+        # btrfs may renumber st_dev across a reboot (issue #7); proven-success
+        # history must stay archivable or updates wedge at the cap forever.
+        self.fixture()
+        for i in range(32):
+            tx = self.history(i, "update" if i % 2 else "install")
+            path = tx / "prepared.json"
+            prepared = json.loads(path.read_text())
+            for pair in prepared.values():
+                pair[0] += 1
+            path.write_text(json.dumps(prepared))
+        with patch.object(u.Updater, "git", side_effect=AssertionError("No history HEAD lookup")):
+            self.preflight()
+        self.assertEqual(list(self.state.iterdir()), [])
+        self.assertEqual(len(list(self.archive.iterdir())), 32)
 
     def test_full_successful_histories_archive_without_rewriting_or_traversing_backups(self):
         for kind in ("install", "update"):

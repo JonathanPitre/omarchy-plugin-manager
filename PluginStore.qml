@@ -64,6 +64,7 @@ Item {
   property var catalog: []
   readonly property var verifiedIds: Model.verifiedIdSet(catalog)
   readonly property var starsById: Model.catalogStarsById(catalog)
+  readonly property var heartsById: Model.catalogHeartsById(catalog)
   property bool catalogLoading: false
   property bool catalogLoaded: false
   property string catalogError: ""
@@ -142,10 +143,11 @@ Item {
   readonly property bool allowUnverifiedInstalls: Model.allowUnverifiedInstalls(selfSettings)
   onAllowUnverifiedInstallsChanged: restampCatalog()
 
-  // Which window the expanded panel opens as. Held here so both settings panes
-  // can show and flip it; the expanded window does not read it from here,
-  // because it has to know before this store's first load has run.
-  readonly property bool tiledExpandedPanel: Model.tiledExpandedPanel(selfSettings)
+  // How the manager opens: popup, overlay or window. Held here so the corner
+  // buttons can show and advance it; the bar click and the expanded window
+  // read it from shell.json instead, because they need it before this store's
+  // first load has run.
+  readonly property string openAs: Model.openAs(selfSettings)
 
   // Persist one setting through the host, merged over the entry as it was
   // loaded. The local copies move only when the host accepted the write; the
@@ -181,8 +183,37 @@ Item {
     return writeSelfSetting("allowUnverifiedInstalls", value, allowUnverifiedInstalls)
   }
 
-  function setTiledExpandedPanel(value) {
-    return writeSelfSetting("tiledExpandedPanel", value, tiledExpandedPanel)
+  // Same guards as a switch, for the one setting that is not a boolean, but
+  // over the entry as shell.json has it now rather than as the last list load
+  // left it. Its buttons sit in the header, live before that load lands, and
+  // the popup's store does not watch the file, so a write from the expanded
+  // panel would otherwise leave this one comparing against a stale mode.
+  // The write always goes and the host decides. The host answers false both
+  // for "nothing changed" and for a write it refused, so a false counts as
+  // saved only when the file already holds this mode; otherwise the form
+  // stays as it is rather than show a mode that was never stored.
+  function setOpenAs(mode) {
+    if (busy) return false
+    if (!shell || typeof shell.updateEntryInline !== "function" || selfId === "") {
+      setStatus("Could not save the setting: no shell connection", true)
+      return false
+    }
+    openAsConfig.reload()
+    var raw = Model.selfEntryFromShellConfig(openAsConfig.text(), selfId)
+    var current = raw === "" ? null : Model.parseSelfEntry(raw)
+    if (!current) {
+      setStatus("Could not read the setting from shell.json", true)
+      return false
+    }
+    var next = Model.withOpenAs(current, mode)
+    if (shell.updateEntryInline(selfId, next) !== true
+        && Model.openAs(Model.parseSelfSettings(raw)) !== mode) {
+      setStatus("Could not save the setting", true)
+      return false
+    }
+    selfEntry = next
+    selfSettings = Model.parseSelfSettings(JSON.stringify(next))
+    return true
   }
 
   property string pendingKind: ""
@@ -249,6 +280,8 @@ Item {
       return "Remove " + pendingLabel + "?\n\nIts folder under ~/.config/omarchy/plugins is deleted."
     if (pendingKind === "update")
       return Model.updateUnverifiedConfirmMessage(pendingLabel, Model.findRow(rows, pendingId))
+    if (pendingKind === "bulk-update")
+      return Model.bulkUpdateConfirmMessage(bulkQueue)
     if (pendingKind === "disable")
       return "Disable " + pendingLabel + "?\n\n"
         + "This is the panel you are looking at. It leaves the bar and this window closes with it — "
@@ -366,6 +399,10 @@ Item {
     rows = Model.applyPinnedUpdates(merged, catalog, allowUnverifiedUpdates)
     rowsLoaded()
     finishOpenLoad()
+    // A batch may have finished while no store was alive to hear it; a fresh
+    // load picks up its recorded summary. Skipped while busy so a summary
+    // never retires an action still running.
+    if (!busy && !bulkActive) consumeBulkSummary()
   }
 
   // ---- Update checks ------------------------------------------------------
@@ -1055,6 +1092,8 @@ Item {
     pendingLabel = ""
     pendingUrl = ""
     pendingPlacementNeeded = false
+    // A dismissed bulk question drops its queue; a run in flight keeps it.
+    if (!bulkActive) bulkQueue = []
   }
 
   // Confirmation answered. A bar widget still owes us one more answer, and it
@@ -1086,6 +1125,19 @@ Item {
       if (!target || target.unverifiedEligible !== true || target.remoteSha !== expected
           || !canStartUpdate(target)) return
       runUpdate(target)
+      return
+    }
+    if (pendingKind === "bulk-update") {
+      // The queue carries the exact commits the dialog named. Each step
+      // re-gates at run time; a moved tip or flipped setting skips that row
+      // with a reason instead of installing something else.
+      var queue = bulkQueue.slice()
+      cancelPending()
+      if (busy) return
+      bulkQueue = queue
+      bulkResults = []
+      bulkActive = true
+      startNextBulk()
       return
     }
     if (pendingKind === "install") {
@@ -1157,6 +1209,18 @@ Item {
   // be held to exactly that commit.
   property string pendingUnverifiedSha: ""
 
+  property var bulkQueue: []
+  property var bulkResults: []
+  property var bulkPendingRequests: []
+  property bool bulkActive: false
+  // The last reported bulk batch: a reloaded store skips a summary it
+  // already showed instead of announcing it twice.
+  property string lastBulkSummaryNonce: ""
+  property string summaryOutput: ""
+  property bool summaryOverflow: false
+  property bool summaryDrainOnly: false
+  readonly property int bulkUpdatableCount: Model.bulkUpdateCandidates(rows).length
+
   // The request a row's Update would send: the verified snapshot when one is
   // installable, otherwise the observed unreviewed tip if the user's setting
   // allows it, otherwise nothing. Cached catalog data chooses the request,
@@ -1196,11 +1260,203 @@ Item {
     pendingKind = "update"
   }
 
+  // The rows one "Update all" would install, re-gated on the live rows: only
+  // candidates whose request still builds and whose bound target still holds.
+  function bulkUpdatables() {
+    if (!root.loadProcessSettled() || !root.updateProcessSettled()) return []
+    var out = []
+    var candidates = Model.bulkUpdateCandidates(rows)
+    for (var i = 0; i < candidates.length; i++) {
+      var row = Model.findRow(rows, candidates[i].id)
+      if (!row || !updateRequest(row)) continue
+      if (candidates[i].kind === "verified") {
+        if (row.pinnedEligible !== true || row.verifiedTargetSha !== candidates[i].targetSha) continue
+      } else if (row.unverifiedEligible !== true || row.remoteSha !== candidates[i].targetSha) continue
+      out.push(candidates[i])
+    }
+    return out
+  }
+
+  function askBulkUpdate() {
+    if (busy || !root.loadProcessSettled() || !root.updateProcessSettled()) return false
+    var candidates = bulkUpdatables()
+    if (candidates.length === 0) return false
+    bulkQueue = candidates
+    bulkResults = []
+    pendingKind = "bulk-update"
+    return true
+  }
+
+  function startNextBulk() {
+    if (!bulkActive) return
+    var requests = []
+    for (var i = 0; i < bulkQueue.length; i++) {
+      if (busy || pinnedProc.running || actionProc.running
+          || !root.loadProcessSettled() || !root.updateProcessSettled()) {
+        for (var j = i; j < bulkQueue.length; j++)
+          bulkResults.push({ id: bulkQueue[j].id, name: bulkQueue[j].name, ok: false, reason: "interrupted" })
+        break
+      }
+      var step = bulkQueue[i]
+      var row = Model.findRow(rows, step.id)
+      var request = row ? updateRequest(row) : null
+      var bound = !!row && !!request
+        && (step.kind === "verified"
+          ? row.pinnedEligible === true && row.verifiedTargetSha === step.targetSha
+          : row.unverifiedEligible === true && row.remoteSha === step.targetSha)
+      if (!bound) {
+        bulkResults.push({ id: step.id, name: step.name, ok: false,
+          reason: !row ? "no longer in the list" : (!request ? "no installable update"
+            : (step.kind === "verified" ? "the verified snapshot moved" : "the upstream tip moved")) })
+        continue
+      }
+      requests.push(request)
+    }
+    if (requests.length > 0) runBulkUpdates(requests)
+    else finishBulk()
+  }
+
+  function runBulkUpdates(requests) {
+    bulkPendingRequests = requests
+    bulkRescanFailed = false
+    if (busy || pinnedProc.running || actionProc.running) {
+      for (var i = 0; i < requests.length; i++) {
+        var row = Model.findRow(rows, requests[i].id)
+        bulkResults.push({ id: requests[i].id, name: row ? row.name : requests[i].id,
+          ok: false, reason: "interrupted" })
+      }
+      finishBulk()
+      return
+    }
+    busyRowId = ""
+    busyId = "Update all"
+    busyKind = "bulk-update"
+    pinnedOutput = ""
+    pinnedExited = false
+    pinnedOverflow = false
+    setStatus("Updating " + requests.length + " plugins; stopping finishes the current preparation and checked updates still apply; closing this window does not cancel it", false)
+    pinnedProc.command = ["/usr/bin/env", "-i", "--", "PATH=/usr/bin:/bin",
+      "WAYLAND_DISPLAY=" + String(Quickshell.env("WAYLAND_DISPLAY") || ""),
+      "/usr/bin/python3", "-I", "-S", pinnedHelperPath,
+      JSON.stringify({ schemaVersion: 1, bulkUpdates: requests })]
+    pinnedProc.running = true
+  }
+
+  function finishBulk() {
+    bulkQueue = []
+    bulkPendingRequests = []
+    bulkActive = false
+    busyKind = ""
+    busyId = ""
+    busyRowId = ""
+    var skipped = 0
+    for (var i = 0; i < bulkResults.length; i++) if (bulkResults[i].ok !== true) skipped++
+    var rescanFailed = bulkRescanFailed
+    setStatus(Model.bulkUpdateSummary(bulkResults)
+      + (rescanFailed ? "; shell did not reload the updated plugins" : ""), skipped > 0 || rescanFailed)
+    bulkRescanFailed = false
+    pendingUpdateReport = ""
+    if (rescanFailed) rows = Model.applyPinnedUpdates(rows, null, allowUnverifiedUpdates)
+    else rows = Model.applyPinnedUpdates(Model.applyUpdateReport(rows, {}), null, allowUnverifiedUpdates)
+    root.actionFinished("bulk-update", "Update all", skipped > 0 || rescanFailed ? 1 : 0)
+    if (!rescanFailed) {
+      root.requestFreshUpdateCycle()
+      root.refreshUpdateData()
+    }
+  }
+
+  function finishBulkProcess() {
+    var outcomes = Object.create(null)
+    var resultsById = Object.create(null)
+    var stepsById = Object.create(null)
+    var processFailure = ""
+    var nonce = ""
+    for (var i = 0; i < bulkQueue.length; i++) stepsById[bulkQueue[i].id] = bulkQueue[i]
+    for (var j = 0; j < bulkResults.length; j++) resultsById[bulkResults[j].id] = bulkResults[j]
+    try {
+      var result = JSON.parse(pinnedOutput)
+      if (!pinnedOverflow && result && result.status === "bulk complete" && Array.isArray(result.updates)) {
+        bulkRescanFailed = result.rescan === "failed"
+        if (typeof result.nonce === "string") {
+          nonce = result.nonce
+          lastBulkSummaryNonce = nonce
+        }
+        for (var j = 0; j < result.updates.length; j++) {
+          var update = result.updates[j]
+          if (update && typeof update.id === "string" && typeof update.status === "string")
+            outcomes[update.id] = update
+        }
+      } else if (!pinnedOverflow && result && result.status === "unchanged; request refused") {
+        processFailure = typeof result.reason === "string"
+          ? result.reason.replace(/[^\x20-\x7e]/g, "").slice(0, 200) : result.status
+      }
+    } catch (error) {}
+    for (var k = 0; k < bulkPendingRequests.length; k++) {
+      var request = bulkPendingRequests[k]
+      var step = stepsById[request.id]
+      if (!step) continue
+      var outcome = outcomes[request.id]
+      var status = outcome ? outcome.status : (processFailure || "outcome unknown; inspect retained transactions")
+      var reason = outcome && typeof outcome.reason === "string"
+        ? outcome.reason.replace(/[^\x20-\x7e]/g, "").slice(0, 200) : status
+      var changed = status.indexOf("updated") === 0
+      resultsById[step.id] = { id: step.id, name: step.name, ok: changed,
+        reason: changed ? "" : (reason || status) }
+    }
+    bulkResults = []
+    for (var n = 0; n < bulkQueue.length; n++)
+      if (resultsById[bulkQueue[n].id]) bulkResults.push(resultsById[bulkQueue[n].id])
+    pinnedOutput = ""
+    finishBulk()
+    return nonce
+  }
+
+  // A batch can outlive this store: the shell reloads every plugin when the
+  // first exchange lands, destroying the batch state with it. The worker
+  // records the summary on disk; a freshly loaded store picks it up here.
+  function consumeBulkSummary(nonce) {
+    if (summaryProc.running) return
+    summaryOutput = ""
+    summaryOverflow = false
+    summaryDrainOnly = typeof nonce === "string" && nonce !== ""
+    summaryProc.command = ["/usr/bin/env", "-i", "--", "PATH=/usr/bin:/bin",
+      "/usr/bin/python3", "-I", "-S", pinnedHelperPath].concat(summaryDrainOnly
+        ? ["--drain-bulk-summary", nonce] : ["--consume-bulk-summary"])
+    summaryProc.running = true
+  }
+
+  function finishBulkSummary() {
+    var raw = summaryOverflow ? "" : summaryOutput
+    summaryOutput = ""
+    if (summaryDrainOnly) return
+    var payload = null
+    try { payload = JSON.parse(raw) } catch (error) {}
+    if (!payload || payload.status !== "bulk complete" || !Array.isArray(payload.updates)
+        || rows.length === 0 || busy || bulkActive) return
+    if (typeof payload.nonce === "string" && payload.nonce !== ""
+        && payload.nonce === lastBulkSummaryNonce) return
+    bulkQueue = []
+    bulkPendingRequests = []
+    for (var i = 0; i < payload.updates.length; i++) {
+      var update = payload.updates[i]
+      if (!update || typeof update.id !== "string") continue
+      var row = Model.findRow(rows, update.id)
+      if (!row) continue
+      bulkQueue.push({ id: row.id, name: row.name })
+      bulkPendingRequests.push({ id: row.id })
+    }
+    if (bulkQueue.length === 0) return
+    pinnedOutput = raw
+    pinnedOverflow = false
+    finishBulkProcess()
+  }
+
   readonly property string pinnedHelperPath:
     decodeURIComponent(Qt.resolvedUrl("helpers/pinned_update.py").toString().replace(/^file:\/\//, ""))
   property string pinnedOutput: ""
   property bool pinnedExited: false
   property bool pinnedOverflow: false
+  property bool bulkRescanFailed: false
 
   function runUpdate(row) {
     if (!canStartUpdate(row) || actionProc.running) return
@@ -1221,11 +1477,14 @@ Item {
     pinnedProc.running = true
   }
 
-  // Both helper shapes land here: the same bounded result, the same statuses
-  // read from a fixed list, and the same refusal to report anything the
-  // helper did not say. Only the words differ.
   function finishPinnedUpdate() {
-    if (!pinnedExited || (busyKind !== "update" && busyKind !== "install")) return
+    if (!pinnedExited) return
+    if (busyKind === "bulk-update") {
+      var nonce = finishBulkProcess()
+      if (nonce !== "") consumeBulkSummary(nonce)
+      return
+    }
+    if (busyKind !== "update" && busyKind !== "install") return
     var installing = busyKind === "install"
     var done = installing ? "installed" : "updated"
     var outcome = "outcome unknown; inspect retained transactions"
@@ -1575,6 +1834,16 @@ Item {
   property bool watchConfig: false
   onWatchConfigChanged: if (!watchConfig) configReload.stop()
 
+  // The blocking read setOpenAs makes, apart from the watcher below, which
+  // only the expanded panel turns on.
+  FileView {
+    id: openAsConfig
+    path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
+    preload: false
+    blockAllReads: true
+    printErrors: false
+  }
+
   FileView {
     id: shellConfig
     path: root.watchConfig ? Quickshell.env("HOME") + "/.config/omarchy/shell.json" : ""
@@ -1817,7 +2086,9 @@ Item {
     stdout: SplitParser {
       splitMarker: ""
       onRead: function(chunk) {
-        if (root.pinnedOutput.length + chunk.length > 4096) {
+        // Bulk results carry every item; single updates keep the small cap.
+        var cap = root.busyKind === "bulk-update" ? 65536 : 4096
+        if (root.pinnedOutput.length + chunk.length > cap) {
           root.pinnedOverflow = true
           root.pinnedOutput = ""
         } else if (!root.pinnedOverflow) root.pinnedOutput += chunk
@@ -1828,6 +2099,25 @@ Item {
       root.pinnedExited = true
       // Drain final raw chunks before interpreting the one bounded result.
       Qt.callLater(root.finishPinnedUpdate)
+    }
+  }
+
+  Process {
+    id: summaryProc
+    clearEnvironment: true
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (root.summaryOutput.length + chunk.length > 65536) {
+          root.summaryOverflow = true
+          root.summaryOutput = ""
+        } else if (!root.summaryOverflow) root.summaryOutput += chunk
+      }
+    }
+    stderr: SplitParser { splitMarker: ""; onRead: function(chunk) {} }
+    onExited: function(exitCode) {
+      // Drain final raw chunks before interpreting the one bounded result.
+      Qt.callLater(root.finishBulkSummary)
     }
   }
 
