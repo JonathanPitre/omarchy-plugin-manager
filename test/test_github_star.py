@@ -55,7 +55,7 @@ class AuthProcess:
         self.code = code
         self.timeout = timeout
 
-    def wait(self, timeout):
+    def wait(self, timeout=None):
         if self.timeout:
             raise subprocess.TimeoutExpired("gh", timeout)
         return self.code

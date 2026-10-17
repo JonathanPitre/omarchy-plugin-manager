@@ -16,9 +16,10 @@ function qmlFunction(name) {
   return store.slice(start, store.indexOf("\n  }", start) + 4)
 }
 
-function starStore() {
+function starStore(catalogEntryFound = true) {
   const effects = []
   const later = []
+  let finishCount = 0
   const state = {
     Model, starBusy: false, pendingStarRequest: null,
     starExited: false, starOutputDone: false, starCode: -1,
@@ -28,7 +29,12 @@ function starStore() {
       callLater: callback => later.push(callback) },
     setStatus: (...args) => effects.push(["status", ...args]),
     flashStatus: (...args) => effects.push(["status", ...args]),
-    bumpCatalogCount: (...args) => effects.push(["count", ...args]),
+    bumpCatalogCount: (...args) => {
+      if (!catalogEntryFound) return false
+      effects.push(["count", ...args])
+      return true
+    },
+    starToggleFinished: () => { finishCount++ },
     browseUrlRequested: url => effects.push(["browser", url]),
   }
   const names = ["toggleStar", "finishStar", "settleStarStart"]
@@ -48,7 +54,7 @@ function starStore() {
       while (later.length) later.shift()()
     },
   }
-  return { state, effects, events }
+  return { state, effects, events, finishCount: () => finishCount }
 }
 
 test("the star command invokes the isolated helper with a validated slug", () => {
@@ -155,6 +161,17 @@ test("failed writes and malformed helper output leave the count unchanged", () =
     assert.equal(state.starBusy, false)
     assert.deepEqual(effects.slice(1), [["status", "Could not change the star for Thing", true]])
   }
+})
+
+test("successful writes finish scroll restoration even when the catalog row is missing", () => {
+  const { state, effects, events, finishCount } = starStore(false)
+  state.toggleStar({ id: "acme.thing", name: "Thing", repo: "https://github.com/acme/thing" })
+  events.started()
+  events.output('{"kind":"changed","starred":true}')
+  events.exited(0)
+  events.stopped()
+  assert.equal(effects.some(effect => effect[0] === "count"), false)
+  assert.equal(finishCount(), 1)
 })
 
 test("each click checks anew after a completed click and rejects an invalid repository", () => {

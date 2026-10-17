@@ -63,7 +63,7 @@ test("Browse reads the canonical catalog endpoint from the helper alone", () => 
   const helper = readFileSync(new URL("../helpers/pinned_update.py", import.meta.url), "utf8")
   assert.match(helper, /^CATALOG_URL = "https:\/\/plugins\.omarchy\.org\/catalog\.json"$/m)
   assert.doesNotMatch(source, /CATALOG_URL|catalog\.json/)
-  assert.deepEqual(source.match(/plugins\.omarchy\.org/g), [])
+  assert.doesNotMatch(source, /plugins\.omarchy\.org/)
 })
 
 test("pinned update eligibility binds raw repo, verified status, unique id and full SHA", () => {
@@ -3513,9 +3513,12 @@ test("GitHub star counts are controls and Marketplace hearts stay read-only", ()
     assert.match(source, /root\.pendingBrowseY = catalogGrid\.contentY/)
     assert.match(source, /catalogGrid\.contentY = Math\.min\(restoreY/)
     assert.match(source, /if \(restoreFocus\) catalogGrid\.forceActiveFocus\(\)/)
+    assert.match(source, /function onStarToggleFinished\(\) \{\s*root\.pendingBrowseY = -1\s*root\.pendingBrowseFocus = false\s*\}/)
   }
   const expanded = readFileSync(new URL("../Expanded.qml", import.meta.url), "utf8")
-  assert.match(expanded, /if \(root\.browsing\) store\.loadCatalog\(true\)/)
+  const loadEverythingStart = expanded.indexOf("function loadEverything()")
+  const loadEverything = expanded.slice(loadEverythingStart, expanded.indexOf("\n  }", loadEverythingStart))
+  assert.doesNotMatch(loadEverything, /loadCatalog\(true\)/)
 })
 
 test("compact panel height uses full available geometry independent of content", () => {
@@ -4661,7 +4664,7 @@ test("the expanded panel starts its loads a beat after it opens", () => {
   // serve an IPC call on its main thread, and that stalls whatever is
   // animating at the time.
   assert.match(expanded, /Timer \{\s*id: initialLoad\s*interval: 1300[\s\S]*?onTriggered: root\.loadEverything\(\)/)
-  assert.match(expanded, /function loadEverything\(\) \{\s*if \(!opened \|\| barMovePending\) return\s*store\.loadOnOpen\(\)[\s\S]*?if \(root\.browsing\) store\.loadCatalog\(true\)\s*\}/)
+  assert.match(expanded, /function loadEverything\(\) \{\s*if \(!opened \|\| barMovePending\) return\s*store\.loadOnOpen\(\)\s*\}/)
   const open = expanded.slice(expanded.indexOf("function open(payloadJson) {"), expanded.indexOf("function loadEverything() {"))
   assert.match(open, /initialLoad\.restart\(\)/)
   assert.doesNotMatch(open, /store\.reload\(\)/)

@@ -700,7 +700,7 @@ Item {
 
   // A surface opens this in the browser: the signed-out star fallback.
   signal browseUrlRequested(string url)
-  signal starToggleFailed()
+  signal starToggleFinished()
 
   // Star notices clear themselves after a few seconds. Install and
   // update messages stay until replaced.
@@ -755,19 +755,23 @@ Item {
     var request = pendingStarRequest
     pendingStarRequest = null
     starBusy = false
-    if (!request) return
+    if (!request) {
+      starToggleFinished()
+      return
+    }
     var result = starStarted ? Model.parseStarResult(starOutput, starCode) : { kind: "fallback" }
     if (result.kind === "fallback") {
-      starToggleFailed()
+      starToggleFinished()
       browseUrlRequested("https://github.com/" + request.slug)
       return
     }
     if (result.kind === "failed") {
-      starToggleFailed()
+      starToggleFinished()
       flashStatus("Could not change the star for " + request.name, true)
       return
     }
     bumpCatalogCount(request.id, result.starred ? 1 : -1)
+    starToggleFinished()
     flashStatus(result.starred ? "Starred " + request.name
       : "Removed the star from " + request.name, false)
   }

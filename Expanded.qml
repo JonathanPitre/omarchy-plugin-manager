@@ -141,9 +141,6 @@ Item {
   function loadEverything() {
     if (!opened || barMovePending) return
     store.loadOnOpen()
-  // The popup may have changed a star since this window's cached fetch.
-    // Refreshing here is what makes those counts current on open.
-    if (root.browsing) store.loadCatalog(true)
   }
 
   Timer {
@@ -374,7 +371,7 @@ Item {
   property bool pendingBrowseFocus: false
   Connections {
     target: store
-    function onStarToggleFailed() {
+    function onStarToggleFinished() {
       root.pendingBrowseY = -1
       root.pendingBrowseFocus = false
     }

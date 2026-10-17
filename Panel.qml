@@ -96,7 +96,7 @@ Panel {
   property bool pendingBrowseFocus: false
   Connections {
     target: store
-    function onStarToggleFailed() {
+    function onStarToggleFinished() {
       root.pendingBrowseY = -1
       root.pendingBrowseFocus = false
     }
