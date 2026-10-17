@@ -24,6 +24,7 @@ Item {
 
   signal closed()
   signal installRequested()
+  signal starRequested()
   signal previewUndecodable()
   signal githubNavigationRequested(var candidates, string fallbackUrl)
   signal repositoryNavigationRequested(string url)
@@ -65,7 +66,7 @@ Item {
     if (entry.license !== "") rows.push({ label: "License", value: entry.license })
     if (entry.verified === true) rows.push({ label: "Marketplace review", value: "Verified" })
     if (Model.starLabel(entry.stars) !== "")
-      rows.push({ label: "GitHub stars", value: Model.starLabel(entry.stars) })
+      rows.push({ label: "GitHub stars", value: Model.starLabel(entry.stars), action: "star" })
     if (Model.starLabel(entry.marketplaceHearts) !== "")
       rows.push({ label: "Marketplace hearts", value: Model.starLabel(entry.marketplaceHearts) })
     rows.push({ label: "Availability", value: stateText })
@@ -306,9 +307,12 @@ Item {
                 model: root.fieldRows
 
                 Item {
+                  id: field
                   required property var modelData
                   width: detailsContent.width
                   height: Math.max(fieldLabel.implicitHeight, fieldValue.implicitHeight)
+
+                  readonly property bool isAction: modelData.action === "star"
 
                   Text {
                     id: fieldLabel
@@ -330,10 +334,21 @@ Item {
                     anchors.right: parent.right
                     anchors.top: parent.top
                     text: modelData.value
-                    color: root.foreground
+                    color: field.isAction && actionMouse.containsMouse ? Color.accent : root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
+                    font.underline: field.isAction && actionMouse.containsMouse
                     wrapMode: Text.WordWrap
+
+                    // The star count remains the control, so it needs no new button.
+                    MouseArea {
+                      id: actionMouse
+                      anchors.fill: parent
+                      enabled: field.isAction
+                      hoverEnabled: field.isAction
+                      cursorShape: field.isAction ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: if (field.modelData.action === "star") root.starRequested()
+                    }
                   }
                 }
               }

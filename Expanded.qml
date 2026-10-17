@@ -81,6 +81,7 @@ Item {
   Connections {
     target: store
     function onRowsLoaded() { root.clampSelection() }
+    function onBrowseUrlRequested(url) { root.navigateExternalUrl(url) }
   }
 
   // ---- Lifecycle (called by the shell) --------------------------------------
@@ -363,6 +364,18 @@ Item {
   // ---- Installed --------------------------------------------------------------
 
   property int selectedIndex: -1
+  // A star rebuilds the grid's model, which drops the scroll offset
+  // back to the top. The click snapshots offset and focus; the rebuild lands
+  // back where the eye was.
+  property real pendingBrowseY: -1
+  property bool pendingBrowseFocus: false
+  Connections {
+    target: store
+    function onStarToggleFinished() {
+      root.pendingBrowseY = -1
+      root.pendingBrowseFocus = false
+    }
+  }
   // What the lists filter on. It follows the search box after a short pause
   // rather than on every keystroke: each change rebuilds every visible row or
   // card, and a word typed at speed would rebuild them once per letter.
@@ -508,7 +521,19 @@ Item {
 
   property var detailsEntry: null
   readonly property bool detailsOpen: detailsEntry !== null
-  onCatalogChanged: if (detailsEntry) detailsEntry = Model.findRow(catalog, detailsEntry.id)
+  onCatalogChanged: {
+    if (detailsEntry) detailsEntry = Model.findRow(catalog, detailsEntry.id)
+    var restoreY = root.pendingBrowseY
+    var restoreFocus = root.pendingBrowseFocus
+    root.pendingBrowseY = -1
+    root.pendingBrowseFocus = false
+    if (restoreY >= 0 && root.browsing) {
+      Qt.callLater(function() {
+        catalogGrid.contentY = Math.min(restoreY, Math.max(0, catalogGrid.contentHeight - catalogGrid.height))
+        if (restoreFocus) catalogGrid.forceActiveFocus()
+      })
+    }
+  }
 
   // The details page is the third face of the flip: the grid turns over
   // into it, Back or Esc turns it back.
@@ -1683,6 +1708,12 @@ Item {
               root.selectedIndex = index
               root.askInstall(modelData)
             }
+            onStarRequested: {
+              if (store.toggleStar(modelData)) {
+                root.pendingBrowseY = catalogGrid.contentY
+                root.pendingBrowseFocus = catalogGrid.activeFocus
+              }
+            }
           }
         }
 
@@ -1756,6 +1787,12 @@ Item {
 
         onBackRequested: root.closeDetails()
         onInstallRequested: root.askInstall(root.detailsEntry)
+        onStarRequested: {
+          if (store.toggleStar(root.detailsEntry)) {
+            root.pendingBrowseY = catalogGrid.contentY
+            root.pendingBrowseFocus = catalogGrid.activeFocus
+          }
+        }
         onGithubNavigationRequested: function(candidates, fallbackUrl) { root.requestGithubNavigation(candidates, fallbackUrl) }
         onRepositoryNavigationRequested: function(url) { root.navigateExternalUrl(url) }
         onPreviewUndecodable: root.previewsSupported = false

@@ -753,6 +753,13 @@ come from `https://api.omarchyplugins.com/v1/stats` at
 `plugins[pluginId].hearts`. Missing or malformed counts are omitted rather than
 shown as zero.
 
+The GitHub star count is also the control, so no new button competes with the
+card's details action. Clicking it toggles the star without leaving when the
+GitHub CLI is signed in. When the CLI is missing or not signed in, the click
+opens the repository in your browser instead. Each click checks GitHub afresh.
+Star notices clear themselves after a few seconds. Marketplace heart counts
+remain read-only until the marketplace API supports plugin clients.
+
 For an exact GitHub repository, opening the Release action checks names
 `v<version>` and then `<version>` through the same bounded, click-time probe used
 by Installed rows. A match opens the published Release; absence or failure falls
@@ -951,6 +958,7 @@ This uses Quickshell's supported command list instead of a map-to-hash environme
 | `/usr/bin/quickshell` | isolated offscreen catalog building with the existing `Model.js` |
 | `bash`, coreutils | the loading and install scripts |
 | `omarchy-launch-browser` | opening repository links in your chosen browser |
+| `gh` | starring and unstarring GitHub repositories without leaving the panel |
 
 Optional: **`qt6-imageformats`** turns on the registry's WebP card thumbnails
 (see [above](#where-the-card-previews-come-from)). Without it the panel falls

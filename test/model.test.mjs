@@ -26,6 +26,8 @@ const Model = new Function(
     installState, installBlockedReason, installStateDiffers, catalogUnverifiedSnapshot,
     installUnverifiedConfirmMessage, allowUnverifiedInstalls,
     starLabel, accentColor, installedTint, catalogDetailFields, catalogMetaLine,
+    starSlugFor, starToggleCommand, parseStarResult,
+    bumpCount,
     repoShortLabel, browsableUrl, repoWebUrl, rowRepoUrl, expandedTabFromPayload, expandedScreenFromPayload,
     normalizedManifestVersion, normalizedReleaseVersion, releaseVersionLabel,
     githubReleaseCandidates, versionReleaseCandidates, versionFallbackUrl,
@@ -54,13 +56,14 @@ const Model = new Function(
 )()
 
 test("Browse reads the canonical catalog endpoint from the helper alone", () => {
-  // The catalog is fetched, projected and cached by the pinned helper; no
-  // QML or JavaScript names the endpoint, so nothing here can be pointed at
-  // another host. Python's subprocess contract pins the same URL and rejects
+  // The catalog is fetched, projected and cached by the pinned helper. No
+  // QML or JavaScript names that endpoint, so nothing here can retarget the
+  // catalog host. Python's subprocess contract pins the same URL and rejects
   // even valid JSON returned with a redirect status.
   const helper = readFileSync(new URL("../helpers/pinned_update.py", import.meta.url), "utf8")
   assert.match(helper, /^CATALOG_URL = "https:\/\/plugins\.omarchy\.org\/catalog\.json"$/m)
-  assert.doesNotMatch(source, /CATALOG_URL|plugins\.omarchy\.org/)
+  assert.doesNotMatch(source, /CATALOG_URL|catalog\.json/)
+  assert.doesNotMatch(source, /plugins\.omarchy\.org/)
 })
 
 test("pinned update eligibility binds raw repo, verified status, unique id and full SHA", () => {
@@ -2527,6 +2530,34 @@ test("starLabel keeps big counts short", () => {
   assert.equal(Model.starLabel(undefined), "")
 })
 
+test("starSlugFor names the exact GitHub repository a star would act on", () => {
+  assert.equal(Model.starSlugFor({ repo: "https://github.com/acme/thing" }), "acme/thing")
+  assert.equal(Model.starSlugFor({ repo: "git@github.com:acme/thing.git" }), "acme/thing")
+  assert.equal(Model.starSlugFor({ repo: "https://gitlab.com/acme/thing" }), "")
+  assert.equal(Model.starSlugFor({ repo: "" }), "")
+  assert.equal(Model.starSlugFor(null), "")
+})
+
+test("star commands invoke the bundled helper with no shell involved", () => {
+  assert.deepEqual(Model.starToggleCommand("/plugin/helpers/github_star.py", "acme/thing"),
+    ["/usr/bin/python3", "-I", "-S", "/plugin/helpers/github_star.py", "acme/thing"])
+  assert.deepEqual(Model.starToggleCommand("/plugin/helpers/github_star.py", ""), [])
+})
+
+test("parseStarResult reads changed, fallback, and failed apart", () => {
+  assert.deepEqual(Model.parseStarResult('{"kind":"changed","starred":true}', 0), { kind: "changed", starred: true })
+  assert.deepEqual(Model.parseStarResult('{"kind":"changed","starred":false}', 0), { kind: "changed", starred: false })
+  assert.deepEqual(Model.parseStarResult('{"kind":"fallback"}', 0), { kind: "fallback" })
+  assert.deepEqual(Model.parseStarResult("", 1), { kind: "failed" })
+})
+
+test("bumpCount moves known counts and never invents unknown ones", () => {
+  assert.equal(Model.bumpCount(4, 1), 5)
+  assert.equal(Model.bumpCount(0, -1), 0)
+  assert.equal(Model.bumpCount(null, 1), null)
+  assert.equal(Model.bumpCount(undefined, 1), null)
+})
+
 // Omarchy themes define foreground, background, accent, urgent and muted —
 // there is no success role to borrow, so the installed badge brings its own
 // green and only has to survive both ends of the theme range.
@@ -3490,6 +3521,53 @@ test("repository and Release actions route browser ownership through Panel", () 
   }
 })
 
+test("GitHub star counts are controls and Marketplace hearts stay read-only", () => {
+  const card = readFileSync(new URL("../CatalogCard.qml", import.meta.url), "utf8")
+  const pane = readFileSync(new URL("../CatalogDetailsPane.qml", import.meta.url), "utf8")
+  const details = readFileSync(new URL("../PluginDetails.qml", import.meta.url), "utf8")
+  const store = readFileSync(new URL("../PluginStore.qml", import.meta.url), "utf8")
+
+  for (const surface of [card, pane, details]) {
+    assert.match(surface, /signal starRequested\(\)/)
+    assert.doesNotMatch(surface, /signal heartRequested\(\)/)
+    assert.doesNotMatch(surface, /Quickshell\.execDetached/)
+  }
+  assert.match(card, /onClicked: root\.starRequested\(\)/)
+  assert.match(pane, /onClicked: root\.starRequested\(\)/)
+  assert.match(details, /action: "star"/)
+  assert.match(details, /label: "Marketplace hearts", value: Model\.starLabel\(entry\.marketplaceHearts\) \}/)
+  assert.match(details, /onClicked: if \(field\.modelData\.action === "star"\) root\.starRequested\(\)/)
+  // The delegate owns the id the action bindings read: without it every
+  // value's color binding fails and falls back to black text.
+  assert.match(details, /Item \{\s*id: field\s*required property var modelData/)
+  // A star without an exact GitHub slug stays inert.
+  assert.match(card, /enabled: root\.starActionable/)
+
+  // The store owns the CLIs; surfaces only forward the entry.
+  assert.match(store, /signal browseUrlRequested\(string url\)/)
+  assert.match(store, /function toggleStar\(entry\)/)
+  assert.match(store, /function bumpCatalogCount\(id, delta\)/)
+  assert.match(store, /id: starProc/)
+  assert.doesNotMatch(store, /heartProc|heartSaveProc|heartsFile|heartsPath|onLoaded: root\.unionHearts/)
+
+  for (const file of ["Panel.qml", "Expanded.qml"]) {
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8")
+    assert.match(source, /store\.toggleStar\(modelData\)/)
+    assert.match(source, /store\.toggleStar\(root\.detailsEntry\)/)
+    assert.match(source, /function onBrowseUrlRequested\(url\) \{ root\.navigateExternalUrl\(url\) \}/)
+    // A star must not lose the scroll offset or focus when the grid rebuilds.
+    assert.match(source, /property real pendingBrowseY: -1/)
+    assert.match(source, /root\.pendingBrowseY = catalogGrid\.contentY/)
+    assert.match(source, /catalogGrid\.contentY = Math\.min\(restoreY/)
+    assert.match(source, /if \(restoreFocus\) catalogGrid\.forceActiveFocus\(\)/)
+    assert.match(source, /function onStarToggleFinished\(\) \{\s*root\.pendingBrowseY = -1\s*root\.pendingBrowseFocus = false\s*\}/)
+  }
+  const expanded = readFileSync(new URL("../Expanded.qml", import.meta.url), "utf8")
+  const loadEverythingStart = expanded.indexOf("function loadEverything()")
+  const loadEverything = expanded.slice(loadEverythingStart, expanded.indexOf("\n  }", loadEverythingStart))
+  assert.doesNotMatch(loadEverything, /loadCatalog\(true\)/)
+})
+
 test("compact panel height uses full available geometry independent of content", () => {
   const panel = readFileSync(new URL("../Panel.qml", import.meta.url), "utf8")
   const surface = panel.match(/KeyboardPanel \{\s*id: panel\b([\s\S]*?)PanelKeyCatcher \{/)
@@ -3971,7 +4049,7 @@ test("catalog cards stay compact while details own complete metadata and actions
   // colour emoji) and its ♥ is hollow. These are filled and stay in-family.
   assert.match(starIcon, /text: "󰓎"/)
   assert.doesNotMatch(starIcon, /anchors\.verticalCenter/)
-  assert.match(starIcon, /color: root\.starColor/)
+  assert.match(starIcon, /color: starMouse\.containsMouse \? "#ffd257" : root\.starColor/)
   assert.match(starIcon, /font\.pixelSize: Style\.font\.title/)
   assert.match(starIcon, /textFormat: Text\.PlainText/)
   const heartIcon = card.slice(card.indexOf("id: heartIcon"), card.indexOf("id: heartCount"))
@@ -4073,8 +4151,10 @@ test("Panel keeps open details synchronized with catalog install state", () => {
   // A fresh fetch is built on the worker thread and published from its reply.
   assert.match(store, /catalog = message\.entries/)
   // Every published catalog — re-stamp or fresh fetch — refreshes the open
-  // details entry from the same list the cards are drawn from.
-  assert.match(panel, /onCatalogChanged: if \(detailsEntry\) detailsEntry = Model\.findRow\(catalog, detailsEntry\.id\)/)
+  // details entry from the same list the cards are drawn from. A snapshot
+  // click also restores the scroll offset the rebuild dropped.
+  assert.match(panel, /onCatalogChanged: \{\s*if \(detailsEntry\) detailsEntry = Model\.findRow\(catalog, detailsEntry\.id\)/)
+  assert.match(panel, /catalogGrid\.contentY = Math\.min\(restoreY/)
   assert.doesNotMatch(panel, /restampCatalogInstallState|Model\.catalogEntries\(/)
 })
 
@@ -5056,7 +5136,7 @@ test("Browse details are a third face of the flip, not a dialog", () => {
   assert.match(expanded, /function closeDetails\(\) \{\s*if \(!detailsOpen\) return\s*flipTo\(-1, function\(\) \{ detailsEntry = null \}\)\s*\}/)
   const grid = expanded.slice(expanded.indexOf("id: catalogGrid"), expanded.indexOf("id: catalogGrid") + 200)
   assert.match(grid, /visible: root\.browsing && !root\.detailsOpen/)
-  const pane = expanded.slice(expanded.indexOf("id: browseDetailsPane"), expanded.indexOf("id: browseDetailsPane") + 1600)
+  const pane = expanded.slice(expanded.indexOf("id: browseDetailsPane"), expanded.indexOf("id: browseDetailsPane") + 2200)
   assert.match(pane, /visible: root\.browsing && root\.detailsOpen/)
   assert.match(pane, /anchors\.top: statusLine\.bottom[\s\S]*?anchors\.bottom: hintBar\.top/)
   assert.match(pane, /entry: root\.detailsEntry/)
@@ -5117,7 +5197,7 @@ test("CatalogDetailsPane shows the cover on the left and the listing on the righ
 
 test("the catalog details page puts stars and hearts at the right of the title line", () => {
   const pane = readFileSync(new URL("../CatalogDetailsPane.qml", import.meta.url), "utf8")
-  const line = pane.slice(pane.indexOf("id: titleLine"), pane.indexOf("id: titleLine") + 3800)
+  const line = pane.slice(pane.indexOf("id: titleLine"), pane.indexOf("id: titleLine") + 5600)
   // The name keeps the left and yields to the metrics; the metrics keep the
   // right edge, the same gold star and red heart the cards wear, each shown
   // only when the listing has a count.
@@ -5125,7 +5205,7 @@ test("the catalog details page puts stars and hearts at the right of the title l
   assert.match(line, /Row \{\s*id: metricsRow\s*anchors\.right: parent\.right/)
   assert.match(line, /readonly property string starText: Model\.starLabel\(root\.entry \? root\.entry\.stars : null\)/)
   assert.match(line, /readonly property string heartText: Model\.starLabel\(root\.entry \? root\.entry\.marketplaceHearts : null\)/)
-  assert.match(line, /id: starIcon[\s\S]*?text: "󰓎"[\s\S]*?color: "#f5c518"/)
+  assert.match(line, /id: starIcon[\s\S]*?text: "󰓎"[\s\S]*?color: starMouse\.containsMouse \? "#ffd257" : "#f5c518"/)
   assert.match(line, /id: heartIcon[\s\S]*?text: "󰋑"[\s\S]*?color: "#e5484d"/)
   assert.match(line, /id: starCount[\s\S]*?anchors\.baseline: starIcon\.baseline[\s\S]*?text: metricsRow\.starText/)
   assert.match(line, /id: heartCount[\s\S]*?anchors\.baseline: heartIcon\.baseline[\s\S]*?text: metricsRow\.heartText/)

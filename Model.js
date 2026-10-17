@@ -1868,6 +1868,50 @@ function starLabel(count) {
   return String(stars)
 }
 
+// ---- Star actions -----------------------------------------------------------
+//
+// The repository a star would act on: an exact GitHub slug, or "" when the
+// listing names nothing starrable. githubRepoSlug already narrows to an exact
+// owner/repo, so the slug stays a path segment and can never become an option.
+function starSlugFor(entry) {
+  if (!entry) return ""
+  return githubRepoSlug(entry.repo)
+}
+
+function starToggleCommand(helperPath, slug) {
+  if (typeof helperPath !== "string" || helperPath === ""
+      || typeof slug !== "string" || slug === ""
+      || githubRepoSlug("https://github.com/" + slug) !== slug) return []
+  return ["/usr/bin/python3", "-I", "-S", helperPath, slug]
+}
+
+function parseStarResult(text, exitCode) {
+  var failed = { kind: "failed" }
+  if (exitCode !== 0 || typeof text !== "string" || text.length > 256) return failed
+  var result = null
+  try {
+    result = JSON.parse(text)
+  } catch (error) {
+    return failed
+  }
+  if (!result || typeof result !== "object" || Array.isArray(result)) return failed
+  var keys = Object.keys(result)
+  if (result.kind === "changed" && keys.length === 2 && typeof result.starred === "boolean")
+    return { kind: "changed", starred: result.starred }
+  if (keys.length === 1 && (result.kind === "fallback" || result.kind === "failed"))
+    return { kind: result.kind }
+  return failed
+}
+
+// Optimistic count moves after a successful toggle. Unknown stays unknown:
+// a missing count is not a zero, and bumping it would invent a number the
+// source never supplied.
+function bumpCount(count, delta) {
+  var base = catalogCount(count)
+  if (base === null) return null
+  return Math.max(0, base + delta)
+}
+
 // What the card's button should say. The registry lists plenty of things that
 // are not one-command installable — suites with their own installers, repos
 // that are not plugin-shaped — and each carries a note saying why. Showing the

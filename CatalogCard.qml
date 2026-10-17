@@ -29,6 +29,7 @@ Rectangle {
 
   signal detailsRequested()
   signal installRequested()
+  signal starRequested()
 
   // The popup's cards carry an info and an install button. The expanded
   // panel turns them off: there, a click or Enter opens a full page that
@@ -71,6 +72,8 @@ Rectangle {
   // tint would look like a warning. The glyphs are the Nerd Font's filled
   // Material icons rather than ★ and ♥: the mono font has no ★, so that one
   // fell through to a colour emoji, and its ♥ is drawn hollow.
+  readonly property string starSlug: Model.starSlugFor(entry)
+  readonly property bool starActionable: starSlug !== ""
   readonly property string starCountText: entry ? Model.starLabel(entry.stars) : ""
   readonly property string heartCountText: entry ? Model.starLabel(entry.marketplaceHearts) : ""
   readonly property color starColor: "#f5c518"
@@ -351,15 +354,20 @@ Rectangle {
           visible: root.hasMetrics
           spacing: Style.space(6)
 
-          Row {
+          Item {
             visible: root.starCountText !== ""
-            spacing: Style.space(2)
+            width: starRowContent.implicitWidth
+            height: starRowContent.implicitHeight
+
+            Row {
+              id: starRowContent
+              spacing: Style.space(2)
 
             Text {
               id: starIcon
               textFormat: Text.PlainText
               text: "󰓎"
-              color: root.starColor
+              color: starMouse.containsMouse ? "#ffd257" : root.starColor
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
             }
@@ -373,11 +381,28 @@ Rectangle {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
             }
+            }
+
+            // The count is the control: the number itself stars, so the card
+            // needs no new button beside its details action.
+            MouseArea {
+              id: starMouse
+              anchors.fill: parent
+              enabled: root.starActionable
+              hoverEnabled: root.starActionable
+              cursorShape: root.starActionable ? Qt.PointingHandCursor : Qt.ArrowCursor
+              onClicked: root.starRequested()
+            }
           }
 
-          Row {
+          Item {
             visible: root.heartCountText !== ""
-            spacing: Style.space(2)
+            width: heartRowContent.implicitWidth
+            height: heartRowContent.implicitHeight
+
+            Row {
+              id: heartRowContent
+              spacing: Style.space(2)
 
             Text {
               id: heartIcon
@@ -397,6 +422,8 @@ Rectangle {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
             }
+            }
+
           }
         }
 

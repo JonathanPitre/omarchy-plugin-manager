@@ -737,6 +737,138 @@ Item {
     + "fi; "
     + "notify-send -a 'Plugin Manager' \"$summary\" \"$detail\""
 
+  // ---- GitHub stars ---------------------------------------------------------
+  property bool starBusy: false
+  property var pendingStarRequest: null
+  property bool starExited: false
+  property bool starOutputDone: false
+  property int starCode: -1
+  property string starOutput: ""
+  property bool starStarted: false
+  property bool starStartSettled: false
+
+  // A surface opens this in the browser: the signed-out star fallback.
+  signal browseUrlRequested(string url)
+  signal starToggleFinished()
+
+  // Star notices clear themselves after a few seconds. Install and
+  // update messages stay until replaced.
+  property string flashedText: ""
+  function flashStatus(text, isError) {
+    flashedText = text
+    setStatus(text, isError === true)
+    flashTimer.restart()
+  }
+  Timer {
+    id: flashTimer
+    interval: 4000
+    repeat: false
+    onTriggered: {
+      if (root.status !== "" && root.status === root.flashedText) root.setStatus("", false)
+    }
+  }
+
+  function toggleStar(entry) {
+    if (starBusy || !entry) return false
+    var slug = Model.starSlugFor(entry)
+    if (slug === "") return false
+    var helperPath = decodeURIComponent(Qt.resolvedUrl("helpers/github_star.py").toString().replace(/^file:\/\//, ""))
+    var command = Model.starToggleCommand(helperPath, slug)
+    if (command.length === 0) return false
+    pendingStarRequest = { id: entry.id, name: entry.name, slug: slug }
+    starExited = false
+    starOutputDone = false
+    starCode = -1
+    starOutput = ""
+    starStarted = false
+    starStartSettled = false
+    starBusy = true
+    flashStatus("Checking the star for " + entry.name, false)
+    starProc.command = command
+    starProc.running = true
+    return true
+  }
+
+  function settleStarStart() {
+    if (!starBusy || starProc.running) return
+    starStartSettled = true
+    if (!starStarted) {
+      starExited = true
+      starOutputDone = true
+    }
+    finishStar()
+  }
+
+  function finishStar() {
+    if (!starBusy || starProc.running || !starExited || !starOutputDone || !starStartSettled) return
+    var request = pendingStarRequest
+    pendingStarRequest = null
+    starBusy = false
+    if (!request) {
+      starToggleFinished()
+      return
+    }
+    var result = starStarted ? Model.parseStarResult(starOutput, starCode) : { kind: "fallback" }
+    if (result.kind === "fallback") {
+      starToggleFinished()
+      browseUrlRequested("https://github.com/" + request.slug)
+      return
+    }
+    if (result.kind === "failed") {
+      starToggleFinished()
+      flashStatus("Could not change the star for " + request.name, true)
+      return
+    }
+    bumpCatalogCount(request.id, result.starred ? 1 : -1)
+    starToggleFinished()
+    flashStatus(result.starred ? "Starred " + request.name
+      : "Removed the star from " + request.name, false)
+  }
+
+  function bumpCatalogCount(id, delta) {
+    var key = String(id)
+    var out = []
+    var touched = false
+    for (var i = 0; i < catalog.length; i++) {
+      var entry = catalog[i]
+      if (entry && String(entry.id) === key) {
+        var copy = {}
+        for (var name in entry) copy[name] = entry[name]
+        copy.stars = Model.bumpCount(entry.stars, delta)
+        out.push(copy)
+        touched = true
+      } else {
+        out.push(entry)
+      }
+    }
+    // A fresh array resets the grid's model, which rebuilds the visible cards
+    // with the moved counts; the details entry follows on catalog change.
+    if (touched) catalog = out
+  }
+
+  Process {
+    id: starProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.starOutput = text
+        root.starOutputDone = true
+        root.finishStar()
+      }
+    }
+    onStarted: {
+      root.starStarted = true
+      root.starStartSettled = true
+      root.finishStar()
+    }
+    onExited: function(exitCode) {
+      root.starCode = exitCode
+      root.starExited = true
+      root.finishStar()
+    }
+    onRunningChanged: if (!running) Qt.callLater(root.settleStarStart)
+  }
+
   // ---- Asking -------------------------------------------------------------
   //
   // Each ask returns whether the request was taken. A surface uses that to do
