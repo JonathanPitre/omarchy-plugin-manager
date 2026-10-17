@@ -440,7 +440,10 @@ def shell_transaction_limit(omarchy):
         if type(doc.get("plugins")) is list:
             candidates.extend(doc["plugins"])
             require(len(candidates) <= 1024, "Shell config exceeds limit")
-        for entry in candidates[:512]:
+        # The scan must cover every accepted candidate: the plugins list is how
+        # the bar sections overfill the 512 candidate allotment, so a slice
+        # here drops exactly the entries the override lives in.
+        for entry in candidates:
             if type(entry) is dict and entry.get("id") == PLUGIN_ID:
                 value = entry.get("transactionLimit")
                 if (type(value) is int and TRANSACTION_LIMIT_MIN <= value <= TRANSACTION_LIMIT_MAX):
@@ -899,6 +902,9 @@ class Updater:
         # Test injection is in-process only; argv/environment never select a home.
         self.home = home if home is not None else pwd.getpwuid(os.getuid()).pw_dir
         self.transaction_limit = TRANSACTION_LIMIT
+        # Status may fail before open_update_root runs; the guarded read needs
+        # a defined absence.
+        self.omarchy = None
         self.deadline = time.monotonic() + 120
         self.fds = []
         self.anchors = []
@@ -1123,18 +1129,29 @@ class Updater:
 
         The active descriptor is the same inode update workers flock. Merely
         observing it does not acquire a lock or authorize a future mutation.
+        The omarchy descriptor survives a missing active directory: the saved
+        limit must be read and reported even before the first transaction
+        exists, or Settings would show a fallback warning nothing earned.
         """
         fd = self.open_home()
-        for part in (".config", "omarchy", "plugin-manager-updates"):
+        self.omarchy = None
+        for part in (".config", "omarchy"):
             self.checkpoint("status-root")
             try:
-                child = self.hold(checked_dir(fd, part, private=part == "plugin-manager-updates"))
+                child = self.hold(checked_dir(fd, part))
             except FileNotFoundError:
                 return None
             self.anchors.append((fd, part, identity(child)))
             fd = child
-        self.state = fd
-        return fd
+        self.omarchy = fd
+        self.checkpoint("status-root")
+        try:
+            child = self.hold(checked_dir(fd, "plugin-manager-updates", private=True))
+        except FileNotFoundError:
+            return None
+        self.anchors.append((fd, "plugin-manager-updates", identity(child)))
+        self.state = child
+        return child
 
     def update_data_status(self):
         """Bounded, read-only observation, not a consistent snapshot or lock."""
@@ -1153,9 +1170,8 @@ class Updater:
             result["paths"] = {"plugins": root + "plugins", "active": root + "plugin-manager-updates",
                                "archive": root + ARCHIVE_NAME}
             active = self.open_update_root()
-            if active is not None:
-                parent, name, _ = self.anchors[-1]
-                self.transaction_limit = shell_transaction_limit(parent)
+            if self.omarchy is not None:
+                self.transaction_limit = shell_transaction_limit(self.omarchy)
             result["limit"] = self.transaction_limit
             count = 0 if active is None else len(self.active_transactions())
             self.check_anchors()
@@ -1320,7 +1336,11 @@ class Updater:
     def archive_at_capacity(self):
         limit = self.transaction_limit
         names = self.active_transactions()
-        require(len(names) <= limit, CAPACITY_REASON)
+        # Over the limit is not a refusal yet: the walk below archives every
+        # proven-success name it reaches, and only the recount decides. A
+        # pre-walk refusal would wedge updates behind history the helper could
+        # have archived down, especially when a configured limit drop landed
+        # behind a stale or unread Settings status.
         if len(names) < limit:
             return
         archive = None

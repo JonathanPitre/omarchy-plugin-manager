@@ -107,7 +107,8 @@ data. The button waits for an available status and for local actions to settle.
 successes archive and new transactions refuse; it never weakens what counts as
 proven success. The helper reads the same `shell.json` entry Settings writes,
 so both agree without a new command shape. Settings never lets the limit drop
-below the live active count, so lowering it cannot wedge updates. If the helper
+below the live active count, so lowering it cannot wedge updates. The helper
+reads the saved value from before the first transaction exists onward; if it
 cannot read the saved value, it enforces the default and Settings names the
 limit actually in force.
 
@@ -624,11 +625,13 @@ and simulated mount identities, never host mounts or live update roots.
 
 ### Recovery and retained transactions
 
-When the active directory holds exactly the configured limit (default 32) of
+When the active directory holds at least the configured limit (default 32) of
 entries, the next install or update first archives
 provably completed transactions into
-`~/.config/omarchy/plugin-manager-updates-archive/txn-<same-id>/`. Below that
-threshold, nothing is archived. Only exact `installed` or `updated` results
+`~/.config/omarchy/plugin-manager-updates-archive/txn-<same-id>/` and refuses
+only when the recount after that walk still sits at the limit, so a limit
+lowered into the active count archives down instead of wedging every update.
+Below that threshold, nothing is archived. Only exact `installed` or `updated` results
 qualify: the published result, original request, prepared identities and
 backup layout must agree, with no `refused.json` marker. Reload, enable or
 finalization failures, partial records, unknown schemas and unsafe entries
