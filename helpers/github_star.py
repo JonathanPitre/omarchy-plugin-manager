@@ -1,16 +1,49 @@
+import glob
 import http.client
 import json
 import os
 import re
 import ssl
+import stat
 import subprocess
 import sys
 import threading
 
-GH_PATH = "/usr/bin/gh"
+SYSTEM_GH = "/usr/bin/gh"
 MAX_STDERR_BYTES = 4096
 MAX_TOKEN_BYTES = 4096
 MAX_RESPONSE_BYTES = 65536
+
+
+def trusted_gh(path):
+    real = os.path.realpath(path)
+    try:
+        info = os.stat(real)
+    except (OSError, ValueError):
+        return None
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid())
+            or info.st_mode & 0o022 or not info.st_mode & stat.S_IXUSR):
+        return None
+    return real
+
+
+def resolve_gh():
+    # gh receives the user's token, so only fixed install locations are trusted, never PATH or mise shims.
+    candidates = [SYSTEM_GH]
+    data = os.environ.get("XDG_DATA_HOME", "")
+    if os.path.isabs(data):
+        data = os.path.join(data, "mise")
+    else:
+        home = os.environ.get("HOME", "")
+        data = os.path.join(home, ".local/share/mise") if os.path.isabs(home) else None
+    if data:
+        for link in ("global", "latest"):
+            candidates += sorted(glob.glob(os.path.join(glob.escape(data), "installs/gh", link, "gh_*/bin/gh")))[:1]
+    for candidate in candidates:
+        real = trusted_gh(candidate)
+        if real:
+            return real
+    return None
 
 
 def gh_environment():
@@ -55,8 +88,11 @@ def run_gh(command, timeout):
 
 
 def read_gh_token():
+    gh = resolve_gh()
+    if gh is None:
+        return None
     try:
-        process = subprocess.Popen([GH_PATH, "auth", "token", "--hostname", "github.com"],
+        process = subprocess.Popen([gh, "auth", "token", "--hostname", "github.com"],
                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                    env=gh_environment(), cwd="/")
     except OSError:
@@ -87,7 +123,10 @@ def read_gh_token():
 
 
 def toggle_with_gh(slug):
-    command = [GH_PATH, "api", "--hostname", "github.com", "--silent"]
+    gh = resolve_gh()
+    if gh is None:
+        return {"kind": "fallback"}
+    command = [gh, "api", "--hostname", "github.com", "--silent"]
     endpoint = "user/starred/" + slug
     check = run_gh(command + [endpoint], 10)
     if check is None or check[0] is None:

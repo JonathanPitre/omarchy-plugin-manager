@@ -8,6 +8,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 import ssl
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +18,8 @@ if HELPER.exists():
     spec = importlib.util.spec_from_file_location("github_star", HELPER)
     star = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(star)
+RESOLVE_GH = getattr(star, "resolve_gh", None)
+TRUSTED_GH = "/trusted/bin/gh"
 
 
 class Response:
@@ -70,6 +73,9 @@ class GithubStarTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {}, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.resolver = patch.object(star, "resolve_gh", return_value=TRUSTED_GH)
+        self.resolver.start()
+        self.addCleanup(self.resolver.stop)
 
     def direct(self, *statuses):
         connection = Connection(*statuses)
@@ -78,7 +84,7 @@ class GithubStarTests(unittest.TestCase):
             result = star.toggle("acme/thing")
         popen.assert_called_once()
         args, kwargs = popen.call_args
-        self.assertEqual(args[0], [star.GH_PATH, "auth", "token", "--hostname", "github.com"])
+        self.assertEqual(args[0], [TRUSTED_GH, "auth", "token", "--hostname", "github.com"])
         self.assertEqual(kwargs["stdout"], subprocess.PIPE)
         self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
         self.assertEqual(kwargs["cwd"], "/")
@@ -190,9 +196,9 @@ class GithubStarTests(unittest.TestCase):
                      patch.object(star.http.client, "HTTPSConnection") as connect:
                     self.assertEqual(star.toggle("acme/thing"), {"kind": "changed", "starred": starred})
                     self.assertEqual(run.call_args_list[0].args[0],
-                                     [star.GH_PATH, "api", "--hostname", "github.com", "--silent", "user/starred/acme/thing"])
+                                     [TRUSTED_GH, "api", "--hostname", "github.com", "--silent", "user/starred/acme/thing"])
                     self.assertEqual(run.call_args_list[1].args[0],
-                                     [star.GH_PATH, "api", "--hostname", "github.com", "--silent", "-X", method, "user/starred/acme/thing"])
+                                     [TRUSTED_GH, "api", "--hostname", "github.com", "--silent", "-X", method, "user/starred/acme/thing"])
                     connect.assert_not_called()
 
     def test_configured_proxy_leaves_no_proxy_and_case_precedence_to_gh(self):
@@ -205,7 +211,7 @@ class GithubStarTests(unittest.TestCase):
                  patch.object(star.http.client, "HTTPSConnection") as connect:
                 self.assertEqual(star.toggle("acme/thing"), {"kind": "changed", "starred": False})
                 self.assertEqual(run.call_args_list[0].args[0],
-                                 [star.GH_PATH, "api", "--hostname", "github.com", "--silent", "user/starred/acme/thing"])
+                                 [TRUSTED_GH, "api", "--hostname", "github.com", "--silent", "user/starred/acme/thing"])
                 connect.assert_not_called()
 
     def test_proxy_check_failure_falls_back_and_write_failure_reports_failed(self):
@@ -222,12 +228,109 @@ class GithubStarTests(unittest.TestCase):
                 self.assertEqual(star.toggle("acme/thing"), {"kind": outcome})
                 connect.assert_not_called()
 
+    def test_no_trusted_gh_falls_back_without_spawning_or_http(self):
+        for env in [{}, {"HTTPS_PROXY": "http://proxy.example"}]:
+            with self.subTest(env=env), patch.dict(os.environ, env), \
+                 patch.object(star, "resolve_gh", return_value=None), \
+                 patch.object(star.subprocess, "Popen") as popen, \
+                 patch.object(star.http.client, "HTTPSConnection") as connect:
+                self.assertEqual(star.toggle("acme/thing"), {"kind": "fallback"})
+                popen.assert_not_called()
+                connect.assert_not_called()
+
     def test_cli_emits_only_the_known_result_without_diagnostics_or_tokens(self):
         output = io.StringIO()
         with patch.object(star, "toggle", return_value={"kind": "failed"}), redirect_stdout(output):
             star.main(["acme/thing"])
         self.assertEqual(output.getvalue(), '{"kind":"failed"}\n')
         self.assertEqual(json.loads(output.getvalue()), {"kind": "failed"})
+
+
+class ResolveGhTests(unittest.TestCase):
+    def setUp(self):
+        self.assertIsNotNone(RESOLVE_GH, "resolve_gh has not been implemented")
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = os.path.realpath(scratch.name)
+        self.home = os.path.join(self.root, "home")
+        os.makedirs(self.home)
+        self.env = patch.dict(os.environ, {"HOME": self.home, "PATH": "/usr/bin:/bin"}, clear=True)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.system = patch.object(star, "SYSTEM_GH", os.path.join(self.root, "missing/gh"))
+        self.system.start()
+        self.addCleanup(self.system.stop)
+
+    def binary(self, path, mode=0o755):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        Path(path).write_text("#!/bin/sh\n")
+        os.chmod(path, mode)
+        return path
+
+    def mise_install(self, data, version, links):
+        installs = os.path.join(data, "installs/gh")
+        path = self.binary(os.path.join(installs, version, "gh_%s_linux_amd64/bin/gh" % version))
+        for link in links:
+            os.symlink("./" + version, os.path.join(installs, link))
+        return path
+
+    def test_prefers_the_trusted_system_binary(self):
+        system = self.binary(os.path.join(self.root, "usr/bin/gh"))
+        self.mise_install(os.path.join(self.home, ".local/share/mise"), "2.0.0", ["global", "latest"])
+        with patch.object(star, "SYSTEM_GH", system):
+            self.assertEqual(RESOLVE_GH(), system)
+
+    def test_falls_back_to_the_mise_global_then_latest_install(self):
+        data = os.path.join(self.home, ".local/share/mise")
+        latest = self.mise_install(data, "2.1.0", ["latest"])
+        self.assertEqual(RESOLVE_GH(), latest)
+        current = self.mise_install(data, "2.0.0", ["global"])
+        self.assertEqual(RESOLVE_GH(), current)
+
+    def test_absolute_xdg_data_home_selects_the_mise_data_dir(self):
+        xdg = os.path.join(self.root, "xdg")
+        expected = self.mise_install(os.path.join(xdg, "mise"), "2.0.0", ["global"])
+        home = self.mise_install(os.path.join(self.home, ".local/share/mise"), "1.0.0", ["global"])
+        with patch.dict(os.environ, {"XDG_DATA_HOME": xdg}):
+            self.assertEqual(RESOLVE_GH(), expected)
+        with patch.dict(os.environ, {"XDG_DATA_HOME": "relative/xdg"}):
+            self.assertEqual(RESOLVE_GH(), home)
+
+    def test_rejects_writable_non_regular_and_foreign_binaries(self):
+        data = os.path.join(self.home, ".local/share/mise")
+        path = self.mise_install(data, "2.0.0", ["global"])
+        for mode in [0o775, 0o757, 0o777, 0o644]:
+            with self.subTest(mode=oct(mode)):
+                os.chmod(path, mode)
+                self.assertIsNone(RESOLVE_GH())
+        os.chmod(path, 0o755)
+        # Fake the owner rather than the caller, so the check also holds when the suite runs as root.
+        real_stat = os.stat
+        def foreign_stat(target, *args, **kwargs):
+            fields = list(real_stat(target, *args, **kwargs)[:10])
+            fields[4] = os.getuid() + 1
+            return os.stat_result(fields)
+        with patch.object(star.os, "stat", foreign_stat):
+            self.assertIsNone(RESOLVE_GH())
+        os.remove(path)
+        os.makedirs(path)
+        os.chmod(path, 0o755)
+        self.assertIsNone(RESOLVE_GH())
+
+    def test_rejects_a_symlink_resolving_to_an_untrusted_file(self):
+        target = self.binary(os.path.join(self.root, "planted/gh"), 0o777)
+        link = os.path.join(self.root, "usr/bin/gh")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(target, link)
+        with patch.object(star, "SYSTEM_GH", link):
+            self.assertIsNone(RESOLVE_GH())
+            os.chmod(target, 0o755)
+            self.assertEqual(RESOLVE_GH(), target)
+
+    def test_path_is_never_consulted(self):
+        planted = self.binary(os.path.join(self.root, "path/gh"))
+        with patch.dict(os.environ, {"PATH": os.path.dirname(planted)}):
+            self.assertIsNone(RESOLVE_GH())
 
 
 if __name__ == "__main__":

@@ -958,7 +958,7 @@ This uses Quickshell's supported command list instead of a map-to-hash environme
 | `/usr/bin/quickshell` | isolated offscreen catalog building with the existing `Model.js` |
 | `bash`, coreutils | the loading and install scripts |
 | `omarchy-launch-browser` | opening repository links in your chosen browser |
-| `gh` | starring and unstarring GitHub repositories without leaving the panel |
+| `gh` | starring and unstarring GitHub repositories without leaving the panel (`/usr/bin/gh` or the mise `global`/`latest` install, never `PATH`) |
 
 Optional: **`qt6-imageformats`** turns on the registry's WebP card thumbnails
 (see [above](#where-the-card-previews-come-from)). Without it the panel falls
