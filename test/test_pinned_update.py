@@ -2323,6 +2323,34 @@ class ArchivalTests(unittest.TestCase):
             self.preflight()
         self.assertEqual(len(list(self.state.iterdir())), 31)
 
+    def test_configured_limit_moves_archival_threshold(self):
+        self.fixture()
+        (self.omarchy / "shell.json").write_text(json.dumps(
+            {"bar": {"layout": {"right": [{"id": "io.github.juancasanueva.plugin-manager",
+                                           "transactionLimit": 8}]}}}))
+        for i in range(8):
+            self.history(i)
+        with patch.object(u.Updater, "git", side_effect=AssertionError("No history HEAD lookup")):
+            self.preflight()
+        self.assertEqual(list(self.state.iterdir()), [])
+        self.assertEqual(len(list(self.archive.iterdir())), 8)
+
+    def test_limit_below_active_count_archives_down_before_refusing(self):
+        # Settings clamps to the live count, but the helper cannot trust the
+        # panel: status may be missing or stale, or shell.json hand-edited.
+        # When the saved limit is below the active count, proven-success
+        # history is archived down first and only the recount refuses.
+        self.fixture()
+        (self.omarchy / "shell.json").write_text(json.dumps(
+            {"plugins": [{"id": "io.github.juancasanueva.plugin-manager",
+                          "transactionLimit": 8}]}))
+        for i in range(12):
+            self.history(i)
+        with patch.object(u.Updater, "git", side_effect=AssertionError("No history HEAD lookup")):
+            self.preflight()
+        self.assertEqual(len(list(self.state.iterdir())), 3)
+        self.assertEqual(len(list(self.archive.iterdir())), 9)
+
     def test_mixed_history_repeated_pressure_and_archive_is_never_enumerated(self):
         self.fixture()
         self.fill(stop=31)
@@ -2619,10 +2647,13 @@ class ArchivalTests(unittest.TestCase):
         self.fill(stop=32)
         tx = self.history(100)
         scan = os.scandir
-        seen = []
+        enumerations = []
+
         class BoundedScan:
             def __init__(self, fd):
                 self.entries = scan(fd)
+                self.reads = 0
+                enumerations.append(0)
             def __enter__(self):
                 return self
             def __exit__(self, *_):
@@ -2630,15 +2661,19 @@ class ArchivalTests(unittest.TestCase):
             def __iter__(self):
                 return self
             def __next__(self):
-                seen.append(1)
-                if len(seen) > 33:
+                self.reads += 1
+                enumerations[-1] = max(enumerations[-1], self.reads)
+                if self.reads > 33:
                     raise AssertionError("Read beyond the bounded inventory")
                 return next(self.entries)
-        with patch.object(u.os, "scandir", BoundedScan), \
-             patch.object(u, "read_file", side_effect=AssertionError("No inspection above capacity")):
+        # One completed txn sits past the limit, so the walk archives it down
+        # and the recount over the 32 pending names still refuses.
+        with patch.object(u.os, "scandir", BoundedScan):
             self.assert_limit()
-        self.assertEqual(len(seen), 33)
-        self.assertTrue(tx.exists())
+        self.assertEqual(enumerations[0], 33)
+        self.assertLessEqual(max(enumerations), 33)
+        self.assertTrue((self.archive / tx.name).exists())
+        self.assertFalse(tx.exists())
         lock = os.open(self.state, u.DIR)
         try:
             u.fcntl.flock(lock, u.fcntl.LOCK_EX | u.fcntl.LOCK_NB)

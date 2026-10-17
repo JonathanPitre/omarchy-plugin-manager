@@ -182,6 +182,23 @@ function withSelfSetting(entry, key, value) {
   return out
 }
 
+// The entry to write back for an integer-valued setting: the clamped value is
+// stored, or the key is removed when it equals the default so the entry does
+// not carry what the reader would assume anyway.
+function withSelfIntSetting(entry, key, value, min, max, fallback) {
+  var out = {}
+  for (var name in entry || {}) {
+    if (!hasOwnKey(entry, name) || name === "id" || name === "__proto__") continue
+    out[name] = entry[name]
+  }
+  var number = typeof value === "number" && isFinite(value) ? Math.floor(value) : fallback
+  if (number < min) number = min
+  if (number > max) number = max
+  if (number === fallback) delete out[key]
+  else out[key] = number
+  return out
+}
+
 // The settings the panel acts on, one key at a time. Strictly the boolean
 // true: a string "true", 1, or anything else a hand edit might produce leaves
 // a setting off. Installing unreviewed code and updating to it are separate
@@ -223,6 +240,45 @@ function withOpenAs(entry, mode) {
   var out = withSelfSetting(entry, "tiledExpandedPanel", false)
   out.openAs = OPEN_AS_MODES.indexOf(mode) >= 0 ? mode : "popup"
   return out
+}
+
+// Active-transaction capacity bounds. The helper enforces the same range read
+// from the same shell.json entry, so the panel and the helper agree without a
+// new command-line or request shape: only the threshold moves, never proof.
+var TRANSACTION_LIMIT_DEFAULT = 32
+var TRANSACTION_LIMIT_MIN = 8
+var TRANSACTION_LIMIT_MAX = 128
+var TRANSACTION_LIMIT_STEP = 8
+var TRANSACTION_LIMIT_NEAR = 4
+
+// The configured history capacity: a bounded integer override, or the default
+// when the key is missing or hostile. A hand edit outside the range keeps the
+// default rather than refusing updates.
+function transactionLimit(settings) {
+  var value = !!settings && hasOwnKey(settings, "transactionLimit")
+    ? settings.transactionLimit : TRANSACTION_LIMIT_DEFAULT
+  return typeof value === "number" && isFinite(value) && Math.floor(value) === value
+    && value >= TRANSACTION_LIMIT_MIN && value <= TRANSACTION_LIMIT_MAX
+    ? value : TRANSACTION_LIMIT_DEFAULT
+}
+
+// Lowest settable capacity: never below the live active count, so lowering
+// the limit can never wedge updates behind history that cannot archive down.
+// Without a fresh status the static minimum applies.
+function transactionLimitFloor(status) {
+  if (!status || status.available !== true || typeof status.activeCount !== "number"
+      || !isFinite(status.activeCount)) return TRANSACTION_LIMIT_MIN
+  var count = Math.floor(status.activeCount)
+  if (count < TRANSACTION_LIMIT_MIN) count = TRANSACTION_LIMIT_MIN
+  if (count > TRANSACTION_LIMIT_MAX) count = TRANSACTION_LIMIT_MAX
+  return count
+}
+
+// True when the helper enforces a different limit than Settings saved: the
+// shell.json entry was missing, unreadable, or hostile, so the helper fell
+// back while Settings still shows the saved value.
+function transactionLimitFallback(status, configured) {
+  return !!status && status.available === true && status.limit !== configured
 }
 
 // This plugin's own entry, found in shell.json itself rather than in what the
@@ -2972,12 +3028,13 @@ function validUpdateDataPaths(paths) {
 function parseUpdateDataStatus(raw, exitCode) {
   var value = updateDataJson(raw, 8192)
   if (!updateDataObject(value, "schemaVersion,paths,available,activeCount,lowerBound,limit,error")
-      || value.schemaVersion !== 1 || value.limit !== 32 || typeof value.available !== "boolean"
+      || value.schemaVersion !== 1 || !updateDataInteger(value.limit, TRANSACTION_LIMIT_MAX)
+      || value.limit < TRANSACTION_LIMIT_MIN || typeof value.available !== "boolean"
       || typeof value.lowerBound !== "boolean" || typeof value.error !== "string" || value.error.length > 200
       || (value.paths !== null && !validUpdateDataPaths(value.paths))) return null
   if (value.available) {
     if (exitCode !== 0 || value.paths === null || value.error !== ""
-        || !updateDataInteger(value.activeCount, 33) || value.lowerBound !== (value.activeCount === 33)) return null
+        || !updateDataInteger(value.activeCount, value.limit + 1) || value.lowerBound !== (value.activeCount === value.limit + 1)) return null
   } else if (exitCode !== 1 || value.activeCount !== null || value.lowerBound || value.error === "") return null
   return value
 }
@@ -3005,7 +3062,15 @@ function parseCleanupResult(raw, exitCode) {
 function updateDataCountLabel(status, loading) {
   if (loading) return "Loading…"
   if (!status || !status.available) return "Unavailable"
-  return status.lowerBound ? "≥33/32 (lower bound)" : status.activeCount + "/32"
+  return status.lowerBound ? "≥" + (status.limit + 1) + "/" + status.limit + " (lower bound)" : status.activeCount + "/" + status.limit
+}
+
+// Warning threshold for Settings: within a few entries of the configured
+// capacity, or already past it. Drives the near-limit warning; never a
+// mutation by itself.
+function updateDataNearLimit(status) {
+  if (!status || status.available !== true) return false
+  return status.lowerBound || status.activeCount >= status.limit - TRANSACTION_LIMIT_NEAR
 }
 
 // Host-owned labels never receive helper errors, paths or free-form output.

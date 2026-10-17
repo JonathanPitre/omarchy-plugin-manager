@@ -149,6 +149,16 @@ Item {
   // first load has run.
   readonly property string openAs: Model.openAs(selfSettings)
 
+  // Active-transaction history capacity. The helper reads the same shell.json
+  // entry and enforces the same bounds, so this only moves the threshold at
+  // which archival and refusal happen, never what counts as proven success.
+  readonly property int transactionLimit: Model.transactionLimit(selfSettings)
+
+  // Lowest settable capacity right now: the live active count, so lowering
+  // the limit can never wedge updates. Falls back to the static minimum
+  // until a fresh status arrives.
+  readonly property int transactionLimitFloor: Model.transactionLimitFloor(updateDataStatus)
+
   // Persist one setting through the host, merged over the entry as it was
   // loaded. The local copies move only when the host accepted the write; the
   // watcher reload then confirms it on every surface. `current` is the value
@@ -214,6 +224,45 @@ Item {
     selfEntry = next
     selfSettings = Model.parseSelfSettings(JSON.stringify(next))
     return true
+  }
+
+  // Persist a bounded integer setting through the host, merged over the entry
+  // as it was loaded. Same guards as the boolean write: no rewrite from an
+  // unread entry, no write without a shell connection, no-op when unchanged.
+  function writeSelfIntSetting(key, value, current, min, max, fallback) {
+    var number = typeof value === "number" && isFinite(value) ? Math.floor(value) : fallback
+    if (number < min) number = min
+    if (number > max) number = max
+    if (number === current) return true
+    if (!selfEntryLoaded || !selfEntry) {
+      setStatus("Settings unavailable until the plugin list loads", true)
+      return false
+    }
+    if (!shell || typeof shell.updateEntryInline !== "function" || selfId === "") {
+      setStatus("Could not save the setting: no shell connection", true)
+      return false
+    }
+    var next = Model.withSelfIntSetting(selfEntry, key, number, min, max, fallback)
+    if (shell.updateEntryInline(selfId, next) !== true) {
+      setStatus("Could not save the setting", true)
+      return false
+    }
+    selfEntry = next
+    selfSettings = Model.parseSelfSettings(JSON.stringify(next))
+    return true
+  }
+
+  function setTransactionLimit(value) {
+    if (!writeSelfIntSetting("transactionLimit", value, transactionLimit,
+      transactionLimitFloor, Model.TRANSACTION_LIMIT_MAX, Model.TRANSACTION_LIMIT_DEFAULT)) return false
+    // The count caption comes from the last status read under the old limit.
+    // Re-read so Settings shows the new threshold against a fresh count.
+    refreshUpdateData()
+    return true
+  }
+
+  function adjustTransactionLimit(step) {
+    return setTransactionLimit(transactionLimit + step)
   }
 
   property string pendingKind: ""

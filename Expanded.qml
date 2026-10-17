@@ -2043,6 +2043,109 @@ Item {
             }
           }
 
+          // How much history the helper keeps before proven successes must
+          // archive: a bounded threshold, never a weaker proof.
+          Rectangle {
+            width: parent.width
+            height: Math.max(transactionLimitText.implicitHeight, limitStepRow.implicitHeight) + Style.space(12) * 2
+            radius: Style.cornerRadius
+            color: Style.normalFill
+            border.width: 1
+            border.color: Qt.alpha(root.secondaryForeground, 0.35)
+
+            Column {
+              id: transactionLimitText
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(12)
+              anchors.right: limitStepRow.left
+              anchors.rightMargin: Style.space(16)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(4)
+
+              Text {
+                // Never rich text: AutoText would fetch what a crafted string points at.
+                textFormat: Text.PlainText
+                width: parent.width
+                text: "Transaction history limit"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                wrapMode: Text.WordWrap
+              }
+
+              Text {
+                // Never rich text: AutoText would fetch what a crafted string points at.
+                textFormat: Text.PlainText
+                width: parent.width
+                text: "Keeps " + store.transactionLimit + " entries (8–128, default 32). History now: " + store.updateDataCount + "."
+                color: root.secondaryForeground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+
+              Text {
+                // Never rich text: AutoText would fetch what a crafted string points at.
+                textFormat: Text.PlainText
+                visible: Model.updateDataNearLimit(store.updateDataStatus)
+                height: visible ? implicitHeight : 0
+                width: parent.width
+                text: "Nearly full: run Delete update data in Info below, or raise the limit."
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+
+              Text {
+                // Never rich text: AutoText would fetch what a crafted string points at.
+                textFormat: Text.PlainText
+                visible: Model.transactionLimitFallback(store.updateDataStatus, store.transactionLimit)
+                height: visible ? implicitHeight : 0
+                width: parent.width
+                text: "The helper is using " + store.updateDataStatus.limit + ": the saved value was unreadable, so the default applies."
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+
+            Row {
+              id: limitStepRow
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(12)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(8)
+
+              Button {
+                id: limitDecreaseButton
+                text: "-"
+                tooltipText: "Keep fewer entries"
+                bordered: true
+                enabled: !root.busy && store.transactionLimit > store.transactionLimitFloor
+                opacity: enabled ? 1 : 0.4
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.caption
+                onClicked: store.adjustTransactionLimit(-Model.TRANSACTION_LIMIT_STEP)
+              }
+
+              Button {
+                id: limitIncreaseButton
+                text: "+"
+                tooltipText: "Keep more entries"
+                bordered: true
+                enabled: !root.busy && store.transactionLimit < Model.TRANSACTION_LIMIT_MAX
+                opacity: enabled ? 1 : 0.4
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.caption
+                onClicked: store.adjustTransactionLimit(Model.TRANSACTION_LIMIT_STEP)
+              }
+            }
+          }
+
           // Restarting the shell is how every plugin, this one included, is
           // read again from disk: Quickshell keeps compiled QML in a cache
           // that a restart alone can go on serving.

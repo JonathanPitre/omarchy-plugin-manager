@@ -94,6 +94,13 @@ PROJECTED_KEYS = ("id", "name", "description", "author", "version", "category", 
 MAX_TREE = 16 * 1024 * 1024
 MAX_DISK = 128 * 1024 * 1024
 TRANSACTION_LIMIT = 32
+TRANSACTION_LIMIT_MIN = 8
+TRANSACTION_LIMIT_MAX = 128
+# This plugin's own shell.json entry, where Settings keeps the bounded
+# capacity override. Mirrors manifest.json; the helper cannot resolve its own
+# checkout path without trusting one.
+PLUGIN_ID = "io.github.juancasanueva.plugin-manager"
+MAX_SHELL_CONFIG = 1024 * 1024
 ARCHIVE_NAME = "plugin-manager-updates-archive"
 MAX_UPDATE_STATUS = 8192
 MAX_BULK_REQUEST = 32768
@@ -400,6 +407,57 @@ def update_data_result():
     """Fixed status schema; unavailable counts and paths are never invented."""
     return {"schemaVersion": 1, "available": False, "paths": None,
             "activeCount": None, "lowerBound": False, "limit": TRANSACTION_LIMIT, "error": ""}
+
+
+def shell_transaction_limit(omarchy):
+    """This plugin's Settings capacity override, or the default threshold.
+
+    Read descriptor-relative from the account's shell.json, bounded and
+    validated, never raising: a missing or hostile config keeps the default.
+    Only changes the capacity threshold, never success proof.
+    """
+    try:
+        fd = os.open("shell.json", FILE, dir_fd=omarchy)
+    except OSError:
+        return TRANSACTION_LIMIT
+    try:
+        info = os.fstat(fd)
+        require(info.st_uid == os.getuid() and stat.S_ISREG(info.st_mode)
+                and info.st_nlink == 1 and info.st_size <= MAX_SHELL_CONFIG,
+                "Unsafe shell config")
+        raw = bytearray()
+        while len(raw) <= MAX_SHELL_CONFIG:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            raw.extend(chunk)
+        require(len(raw) <= MAX_SHELL_CONFIG, "Shell config exceeds limit")
+        doc = document(bytes(raw), MAX_SHELL_CONFIG)
+        require(type(doc) is dict, "Invalid shell config")
+        candidates = []
+        bar = doc.get("bar")
+        if type(bar) is dict and type(bar.get("layout")) is dict:
+            for section in bar["layout"].values():
+                if type(section) is list:
+                    candidates.extend(section)
+                    require(len(candidates) <= 512, "Shell config exceeds limit")
+        if type(doc.get("plugins")) is list:
+            candidates.extend(doc["plugins"])
+            require(len(candidates) <= 1024, "Shell config exceeds limit")
+        # The scan must cover every accepted candidate: the plugins list is how
+        # the bar sections overfill the 512 candidate allotment, so a slice
+        # here drops exactly the entries the override lives in.
+        for entry in candidates:
+            if type(entry) is dict and entry.get("id") == PLUGIN_ID:
+                value = entry.get("transactionLimit")
+                if (type(value) is int and TRANSACTION_LIMIT_MIN <= value <= TRANSACTION_LIMIT_MAX):
+                    return value
+                return TRANSACTION_LIMIT
+        return TRANSACTION_LIMIT
+    except (OSError, Refused, ValueError):
+        return TRANSACTION_LIMIT
+    finally:
+        os.close(fd)
 
 
 CLEANUP_MARKER = ".cleanup-started"
@@ -847,6 +905,10 @@ class Updater:
     def __init__(self, home=None):
         # Test injection is in-process only; argv/environment never select a home.
         self.home = home if home is not None else pwd.getpwuid(os.getuid()).pw_dir
+        self.transaction_limit = TRANSACTION_LIMIT
+        # Status may fail before open_update_root runs; the guarded read needs
+        # a defined absence.
+        self.omarchy = None
         self.deadline = time.monotonic() + 120
         self.fds = []
         self.anchors = []
@@ -1071,18 +1133,29 @@ class Updater:
 
         The active descriptor is the same inode update workers flock. Merely
         observing it does not acquire a lock or authorize a future mutation.
+        The omarchy descriptor survives a missing active directory: the saved
+        limit must be read and reported even before the first transaction
+        exists, or Settings would show a fallback warning nothing earned.
         """
         fd = self.open_home()
-        for part in (".config", "omarchy", "plugin-manager-updates"):
+        self.omarchy = None
+        for part in (".config", "omarchy"):
             self.checkpoint("status-root")
             try:
-                child = self.hold(checked_dir(fd, part, private=part == "plugin-manager-updates"))
+                child = self.hold(checked_dir(fd, part))
             except FileNotFoundError:
                 return None
             self.anchors.append((fd, part, identity(child)))
             fd = child
-        self.state = fd
-        return fd
+        self.omarchy = fd
+        self.checkpoint("status-root")
+        try:
+            child = self.hold(checked_dir(fd, "plugin-manager-updates", private=True))
+        except FileNotFoundError:
+            return None
+        self.anchors.append((fd, "plugin-manager-updates", identity(child)))
+        self.state = child
+        return child
 
     def update_data_status(self):
         """Bounded, read-only observation, not a consistent snapshot or lock."""
@@ -1101,13 +1174,16 @@ class Updater:
             result["paths"] = {"plugins": root + "plugins", "active": root + "plugin-manager-updates",
                                "archive": root + ARCHIVE_NAME}
             active = self.open_update_root()
+            if self.omarchy is not None:
+                self.transaction_limit = shell_transaction_limit(self.omarchy)
+            result["limit"] = self.transaction_limit
             count = 0 if active is None else len(self.active_transactions())
             self.check_anchors()
             if active is not None:
                 parent, name, _ = self.anchors[-1]
                 self.recheck_directory(parent, name, active)
             self.checkpoint("status-finish")
-            result.update(available=True, activeCount=count, lowerBound=count > TRANSACTION_LIMIT)
+            result.update(available=True, activeCount=count, lowerBound=count > self.transaction_limit)
         except (OSError, Refused, UnicodeError) as error:
             result["error"] = reason_text(error)
         finally:
@@ -1159,10 +1235,12 @@ class Updater:
             self.original = self.hold(checked_dir(self.plugins, plugin_id))
             self.anchors.append((self.plugins, plugin_id, identity(self.original)))
         require(os.fstat(self.state).st_dev == os.fstat(self.plugins).st_dev, "Staging must share filesystem")
+        self.transaction_limit = shell_transaction_limit(self.omarchy)
         self.archive_at_capacity()
 
     def active_transactions(self):
-        """At most 32 names; the 33rd signals manual review without inspection."""
+        """At most limit names; the limit+1th signals manual review without inspection."""
+        limit = self.transaction_limit
         names = []
         # A fresh view avoids stale directory enumeration on btrfs, while
         # remaining bound to the held state inode (also important for recount).
@@ -1172,7 +1250,7 @@ class Updater:
                 for entry in entries:
                     self.checkpoint("archive-inventory")
                     names.append(entry.name)
-                    if len(names) > TRANSACTION_LIMIT:
+                    if len(names) > limit:
                         break
         finally:
             os.close(view)
@@ -1191,6 +1269,9 @@ class Updater:
 
         Return byte/inode evidence for rechecks, not a recovered transaction or
         an assertion about the plugin's current HEAD. Unknown history stays put.
+        Stored device numbers are evidence, not assertions: the kernel may
+        renumber st_dev across a remount or reboot while the directories are
+        the same ones, so identity is the inode plus current co-location.
         """
         require(self.absent(tx, "refused.json"), "Refused history")
         require(self.absent(tx, CLEANUP_MARKER), "Interrupted cleanup history")
@@ -1257,9 +1338,14 @@ class Updater:
         return archive
 
     def archive_at_capacity(self):
+        limit = self.transaction_limit
         names = self.active_transactions()
-        require(len(names) <= TRANSACTION_LIMIT, CAPACITY_REASON)
-        if len(names) < TRANSACTION_LIMIT:
+        # Over the limit is not a refusal yet: the walk below archives every
+        # proven-success name it reaches, and only the recount decides. A
+        # pre-walk refusal would wedge updates behind history the helper could
+        # have archived down, especially when a configured limit drop landed
+        # behind a stale or unread Settings status.
+        if len(names) < limit:
             return
         archive = None
         try:
@@ -1305,7 +1391,7 @@ class Updater:
             self.checkpoint("archive-recount")
         except (OSError, Refused) as error:
             raise Refused(ARCHIVE_REASON) from error
-        require(len(names) < TRANSACTION_LIMIT, CAPACITY_REASON)
+        require(len(names) < limit, CAPACITY_REASON)
 
     def check_anchors(self):
         for parent, name, expected in self.anchors:
