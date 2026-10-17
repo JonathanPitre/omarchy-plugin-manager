@@ -1255,15 +1255,6 @@ function catalogCount(value) {
   return value
 }
 
-// Engagement stats travel under marketplace-prefixed keys in the projected
-// cache, but ad-hoc callers may pass the bare website names. The first valid
-// count wins; otherwise the metric stays unknown and sorts after real values.
-function catalogStatCount(source, primary, fallback) {
-  var first = catalogCount(source ? source[primary] : null)
-  if (first !== null) return first
-  return catalogCount(source ? source[fallback] : null)
-}
-
 function catalogEngagementCount(value) {
   var count = catalogCount(value)
   return count === null ? 0 : count
@@ -1362,9 +1353,9 @@ function catalogEntries(doc, installedIds, allowUnverified) {
       installNote: plainText(p.installNote).trim(),
       verified: p.verificationStatus === "verified",
       stars: catalogCount(p.stars),
-      marketplaceHearts: catalogStatCount(p, "marketplaceHearts", "hearts"),
-      marketplaceViews: catalogStatCount(p, "marketplaceViews", "views"),
-      marketplaceCopies: catalogStatCount(p, "marketplaceCopies", "copies"),
+      marketplaceHearts: catalogCount(p.marketplaceHearts),
+      marketplaceViews: catalogCount(p.marketplaceViews),
+      marketplaceCopies: catalogCount(p.marketplaceCopies),
       listedAt: plainText(p.listedAt).trim(),
       addedAt: plainText(p.addedAt).trim(),
       repositoryUpdatedAt: plainText(p.repositoryUpdatedAt).trim(),
@@ -1537,18 +1528,20 @@ function catalogRankScores(entries) {
   return overall
 }
 
-function compareCatalogEntries(a, b, sort, leftTimestamp, rightTimestamp, leftActivity, rightActivity, leftInstallRate, rightInstallRate, leftRank, rightRank) {
+function compareCatalogEntries(left, right, sort) {
+  var a = left.entry
+  var b = right.entry
   var mode = sort || CATALOG_SORT_STARS
   if (mode === CATALOG_SORT_RECENTLY_ADDED) {
-    var leftHasTimestamp = leftTimestamp !== null && leftTimestamp !== undefined
-    var rightHasTimestamp = rightTimestamp !== null && rightTimestamp !== undefined
+    var leftHasTimestamp = left.timestamp !== null && left.timestamp !== undefined
+    var rightHasTimestamp = right.timestamp !== null && right.timestamp !== undefined
     if (leftHasTimestamp !== rightHasTimestamp) return leftHasTimestamp ? -1 : 1
-    if (leftHasTimestamp && leftTimestamp !== rightTimestamp) return leftTimestamp > rightTimestamp ? -1 : 1
+    if (leftHasTimestamp && left.timestamp !== right.timestamp) return left.timestamp > right.timestamp ? -1 : 1
   } else if (mode === CATALOG_SORT_ACTIVITY) {
-    var leftHasActivity = leftActivity !== null && leftActivity !== undefined
-    var rightHasActivity = rightActivity !== null && rightActivity !== undefined
+    var leftHasActivity = left.activity !== null && left.activity !== undefined
+    var rightHasActivity = right.activity !== null && right.activity !== undefined
     if (leftHasActivity !== rightHasActivity) return leftHasActivity ? -1 : 1
-    if (leftHasActivity && leftActivity !== rightActivity) return leftActivity > rightActivity ? -1 : 1
+    if (leftHasActivity && left.activity !== right.activity) return left.activity > right.activity ? -1 : 1
   } else if (mode === CATALOG_SORT_STARS || mode === CATALOG_SORT_HEARTS
     || mode === CATALOG_SORT_VIEWS || mode === CATALOG_SORT_COPIES) {
     var field = mode === CATALOG_SORT_HEARTS ? "marketplaceHearts"
@@ -1558,15 +1551,15 @@ function compareCatalogEntries(a, b, sort, leftTimestamp, rightTimestamp, leftAc
     var rightMetric = b[field] === null || b[field] === undefined ? -1 : b[field]
     if (leftMetric !== rightMetric) return rightMetric - leftMetric
   } else if (mode === CATALOG_SORT_INSTALL_RATE) {
-    if (leftInstallRate !== rightInstallRate) return rightInstallRate - leftInstallRate
+    if (left.installRate !== right.installRate) return right.installRate - left.installRate
     var leftViews = catalogInstallRateViews(a)
     var rightViews = catalogInstallRateViews(b)
     if (leftViews !== rightViews) return rightViews - leftViews
   } else if (mode === CATALOG_SORT_RANK) {
-    var leftHasRank = leftRank !== null && leftRank !== undefined
-    var rightHasRank = rightRank !== null && rightRank !== undefined
+    var leftHasRank = left.rank !== null && left.rank !== undefined
+    var rightHasRank = right.rank !== null && right.rank !== undefined
     if (leftHasRank !== rightHasRank) return leftHasRank ? -1 : 1
-    if (leftHasRank && leftRank !== rightRank) return leftRank - rightRank
+    if (leftHasRank && left.rank !== right.rank) return left.rank - right.rank
   } else if (mode === CATALOG_SORT_VERIFIED || mode === CATALOG_SORT_UNVERIFIED) {
     var leftVerified = a.verified === true
     var rightVerified = b.verified === true
@@ -1613,8 +1606,7 @@ function sortCatalog(entries, sort) {
     })
   }
   decorated.sort(function(a, b) {
-    return compareCatalogEntries(a.entry, b.entry, mode, a.timestamp, b.timestamp,
-      a.activity, b.activity, a.installRate, b.installRate, a.rank, b.rank) || a.index - b.index
+    return compareCatalogEntries(a, b, mode) || a.index - b.index
   })
 
   var out = []

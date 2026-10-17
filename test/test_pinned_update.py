@@ -2060,22 +2060,23 @@ class CatalogCacheTests(unittest.TestCase):
 
     def test_stats_are_joined_by_id_and_unavailable_stats_read_as_missing(self):
         for name, stats, expected in [
-            ("valid", {"plugins": {"acme.clock": {"hearts": 42}}}, 42),
-            ("other id", {"plugins": {"acme.other": {"hearts": 42}}}, None),
-            ("false hearts", {"plugins": {"acme.clock": {"hearts": False}}}, None),
-            ("null hearts", {"plugins": {"acme.clock": {"hearts": None}}}, None),
-            ("record is not an object", {"plugins": {"acme.clock": 5}}, None),
-            ("plugins is not an object", {"plugins": []}, None),
-            ("malformed", b"{not-json", None),
-            ("oversized", b'{"plugins":{"acme.clock":{"hearts":42}},"padding":"' + b"x" * u.MAX_STATS + b'"}', None),
-            ("fetch refused", u.Refused("Command failed: curl"), None),
-            ("fetch error", OSError("no curl"), None),
+            ("valid", {"plugins": {"acme.clock": {"hearts": 42, "views": 80, "copies": 12}}}, (42, 80, 12)),
+            ("other id", {"plugins": {"acme.other": {"hearts": 42, "views": 80, "copies": 12}}}, (None, None, None)),
+            ("false values", {"plugins": {"acme.clock": {"hearts": False, "views": False, "copies": False}}}, (None, None, None)),
+            ("null values", {"plugins": {"acme.clock": {"hearts": None, "views": None, "copies": None}}}, (None, None, None)),
+            ("record is not an object", {"plugins": {"acme.clock": 5}}, (None, None, None)),
+            ("plugins is not an object", {"plugins": []}, (None, None, None)),
+            ("malformed", b"{not-json", (None, None, None)),
+            ("oversized", b'{"plugins":{"acme.clock":{"hearts":42,"views":80,"copies":12}},"padding":"' + b"x" * u.MAX_STATS + b'"}', (None, None, None)),
+            ("fetch refused", u.Refused("Command failed: curl"), (None, None, None)),
+            ("fetch error", OSError("no curl"), (None, None, None)),
         ]:
             with self.subTest(name=name):
                 self.stats = stats
                 projection = json.loads(self.serve(force=True))
                 projected = projection["plugins"][0]
-                self.assertEqual(projected["marketplaceHearts"], expected)
+                self.assertEqual((projected["marketplaceHearts"], projected["marketplaceViews"],
+                                  projected["marketplaceCopies"]), expected)
                 self.assertEqual(projected["addedAt"], "2026-08-20")
                 self.assertEqual(projected["listedAt"], "2026-08-20T12:34:56.789Z")
 

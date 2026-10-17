@@ -2376,6 +2376,46 @@ test("Browse sorting keeps stars and hearts independent with deterministic tie-b
   assert.deepEqual(entries.map(e => e.id), ["z.same", "A.same", "b.beta", "c.alpha"])
 })
 
+test("Browse sort modes follow their listing data and put missing values last", () => {
+  const entries = [
+    { id: "missing", name: "A missing", verified: false },
+    { id: "old", name: "B old", stars: 1, marketplaceHearts: 1, marketplaceViews: 20,
+      marketplaceCopies: 1, listedAt: "2026-08-01T00:00:00Z", repositoryUpdatedAt: "2026-08-01T00:00:00Z",
+      installCommand: "install old", verified: true },
+    { id: "new", name: "C new", stars: 3, marketplaceHearts: 3, marketplaceViews: 100,
+      marketplaceCopies: 20, listedAt: "2026-08-03T00:00:00Z", versionUpdatedAt: "2026-08-03T00:00:00Z",
+      installCommand: "install new", verified: false },
+    { id: "middle", name: "D middle", stars: 2, marketplaceHearts: 2, marketplaceViews: 50,
+      marketplaceCopies: 10, listedAt: "2026-08-02T00:00:00Z", repositoryUpdatedAt: "2026-08-02T00:00:00Z",
+      installCommand: "install middle", verified: true }
+  ]
+
+  assert.deepEqual(Model.sortCatalog(entries, "updated").map(e => e.id), ["new", "middle", "old", "missing"])
+  assert.deepEqual(Model.sortCatalog(entries, "views").map(e => e.id), ["new", "middle", "old", "missing"])
+  assert.deepEqual(Model.sortCatalog(entries, "copies").map(e => e.id), ["new", "middle", "old", "missing"])
+  assert.deepEqual(Model.sortCatalog(entries, "installRate").map(e => e.id), ["new", "middle", "old", "missing"])
+  assert.deepEqual(Model.sortCatalog(entries, "rank").map(e => e.id), ["new", "middle", "old", "missing"])
+  assert.deepEqual(Model.sortCatalog(entries, "verified").map(e => e.id), ["old", "middle", "missing", "new"])
+  assert.deepEqual(Model.sortCatalog(entries, "unverified").map(e => e.id), ["missing", "new", "old", "middle"])
+})
+
+test("Browse install rate needs 20 views and top-ranked ties keep name order", () => {
+  const entries = [
+    { id: "few", name: "A few views", marketplaceViews: 19, marketplaceCopies: 19, installCommand: "install" },
+    { id: "tie-b", name: "B tied", stars: 10, marketplaceHearts: 10, marketplaceViews: 20, marketplaceCopies: 10 },
+    { id: "tie-a", name: "A tied", stars: 10, marketplaceHearts: 10, marketplaceViews: 20, marketplaceCopies: 10 },
+    { id: "rated", name: "Rated", marketplaceViews: 20, marketplaceCopies: 20, installCommand: "install" }
+  ]
+
+  assert.deepEqual(Model.sortCatalog(entries, "installRate").map(e => e.id), ["rated", "tie-a", "tie-b", "few"])
+  assert.deepEqual(Model.sortCatalog(entries, "rank").map(e => e.id), ["tie-a", "tie-b", "rated", "few"])
+})
+
+test("catalog engagement stats come only from marketplace-prefixed projection fields", () => {
+  const entry = Model.catalogEntries({ plugins: [{ id: "bare", hearts: 5, views: 30, copies: 4 }] }, {})[0]
+  assert.deepEqual([entry.marketplaceHearts, entry.marketplaceViews, entry.marketplaceCopies], [null, null, null])
+})
+
 test("Browse sorting is stable for exact missing-metadata ties", () => {
   const entries = [
     { id: "same", name: "Same", stars: null, marketplaceHearts: null, marker: 1 },
