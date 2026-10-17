@@ -1076,7 +1076,8 @@ function actionGerund(kind) {
 //
 // omarchyplugins.com publishes the same resolved catalog its own site renders
 // from: name, description, author, category, GitHub stars, verification state,
-// and a curated install command per plugin. Anonymous Marketplace hearts come
+// activity timestamps, and a curated install command per plugin. Anonymous
+// Marketplace views, copies, and hearts come
 // from the site's engagement API and are joined by plugin id before parsing.
 // We read the install command, we never execute it — the install url is parsed
 // out and validated, then run through the same argv array the Installed tab uses.
@@ -1100,6 +1101,13 @@ var CATALOG_AVAILABILITY_INSTALLED = "installed"
 var CATALOG_SORT_STARS = "stars"
 var CATALOG_SORT_HEARTS = "hearts"
 var CATALOG_SORT_RECENTLY_ADDED = "recently-added"
+var CATALOG_SORT_ACTIVITY = "updated"
+var CATALOG_SORT_VIEWS = "views"
+var CATALOG_SORT_COPIES = "copies"
+var CATALOG_SORT_RANK = "rank"
+var CATALOG_SORT_INSTALL_RATE = "installRate"
+var CATALOG_SORT_VERIFIED = "verified"
+var CATALOG_SORT_UNVERIFIED = "unverified"
 var CATALOG_SORT_NAME = "name"
 
 // The registry assigns every plugin an accent and a pair of initials — its
@@ -1247,6 +1255,11 @@ function catalogCount(value) {
   return value
 }
 
+function catalogEngagementCount(value) {
+  var count = catalogCount(value)
+  return count === null ? 0 : count
+}
+
 // The curated installCommand carries the exact clone url — including the .git
 // suffix that `repo` often omits — so the url is taken from there. It is
 // pulled out and validated rather than run: a command string from the network
@@ -1341,8 +1354,12 @@ function catalogEntries(doc, installedIds, allowUnverified) {
       verified: p.verificationStatus === "verified",
       stars: catalogCount(p.stars),
       marketplaceHearts: catalogCount(p.marketplaceHearts),
+      marketplaceViews: catalogCount(p.marketplaceViews),
+      marketplaceCopies: catalogCount(p.marketplaceCopies),
       listedAt: plainText(p.listedAt).trim(),
       addedAt: plainText(p.addedAt).trim(),
+      repositoryUpdatedAt: plainText(p.repositoryUpdatedAt).trim(),
+      versionUpdatedAt: plainText(p.versionUpdatedAt).trim(),
       accent: String(p.accent || ""),
       initials: plainText(p.initials).toUpperCase(),
       license: plainText(p.license).trim(),
@@ -1366,6 +1383,7 @@ function catalogEntries(doc, installedIds, allowUnverified) {
     // thousand entries each time the query changes.
     entry.searchText = catalogSearchText(entry)
     entry.listedTimestamp = catalogTimestamp(entry)
+    entry.activityTimestamp = catalogActivityTimestamp(entry)
     entry.installUrl = installUrlFor(entry)
     // A listing with no usable url, or no verified snapshot to install exactly,
     // cannot be installed from here whatever the registry claims: the flag
@@ -1420,18 +1438,135 @@ function catalogTimestamp(entry) {
   return isFinite(timestamp) ? timestamp : null
 }
 
-function compareCatalogEntries(a, b, sort, leftTimestamp, rightTimestamp) {
+// Recent activity mirrors the website's activityTime: the newest of the
+// version and repository timestamps. Unknown stays unknown and sorts after
+// real activity, as missing stars do.
+function catalogActivityTimestamp(entry) {
+  if (!entry) return null
+  var candidates = [entry.versionUpdatedAt, entry.repositoryUpdatedAt]
+  var best = null
+  for (var i = 0; i < candidates.length; i++) {
+    var text = plainText(candidates[i]).trim()
+    if (text === "") continue
+    var timestamp = Date.parse(text)
+    if (!isFinite(timestamp)) continue
+    if (best === null || timestamp > best) best = timestamp
+  }
+  return best
+}
+
+// Install rate mirrors the website: copies per detail view ranked by the
+// lower bound of the 95% Wilson score interval, capped at 100%. Listings
+// without an install command or with fewer than 20 views are unrated (-1)
+// and sort after rated listings.
+function catalogInstallRateScore(entry) {
+  if (!entry || !String(entry.installCommand || "").trim()) return -1
+  var views = catalogEngagementCount(entry.marketplaceViews)
+  if (views < 20) return -1
+  var copies = Math.min(catalogEngagementCount(entry.marketplaceCopies), views)
+  if (!copies) return 0
+  var rate = copies / views
+  var z = 1.96
+  var center = rate + z * z / (2 * views)
+  var margin = z * Math.sqrt((rate * (1 - rate) + z * z / (4 * views)) / views)
+  return (center - margin) / (1 + z * z / views)
+}
+
+function catalogInstallRateViews(entry) {
+  var views = entry ? entry.marketplaceViews : null
+  return views === null || views === undefined ? -1 : views
+}
+
+// Top ranked mirrors the website's engagementRanks: per-metric competition
+// ranks over hearts, copies, views and stars are summed, and the smallest sum
+// wins. Listings with no signal in any metric stay unranked and sort after.
+function catalogRankScores(entries) {
+  var metrics = ["marketplaceHearts", "marketplaceCopies", "marketplaceViews", "stars"]
+  var counts = []
+  var ranked = []
+  for (var i = 0; i < (entries || []).length; i++) {
+    var row = []
+    var hasSignal = false
+    for (var m = 0; m < metrics.length; m++) {
+      var value = catalogEngagementCount(entries[i] ? entries[i][metrics[m]] : null)
+      row.push(value)
+      if (value > 0) hasSignal = true
+    }
+    counts.push(row)
+    if (hasSignal) ranked.push(i)
+  }
+  var sums = []
+  for (var k = 0; k < (entries || []).length; k++) sums.push(0)
+  var overall = []
+  for (var o = 0; o < (entries || []).length; o++) overall.push(null)
+  if (ranked.length === 0) return overall
+  for (var metric = 0; metric < metrics.length; metric++) {
+    var ordered = ranked.slice().sort(function(left, right) {
+      if (counts[right][metric] !== counts[left][metric]) return counts[right][metric] - counts[left][metric]
+      return left - right
+    })
+    var rank = 0
+    var previous = null
+    for (var n = 0; n < ordered.length; n++) {
+      var value = counts[ordered[n]][metric]
+      if (value !== previous) rank = n + 1
+      previous = value
+      sums[ordered[n]] += rank
+    }
+  }
+  var byScore = ranked.slice().sort(function(left, right) {
+    if (sums[left] !== sums[right]) return sums[left] - sums[right]
+    return left - right
+  })
+  var rank = 0
+  var previous = null
+  for (var s = 0; s < byScore.length; s++) {
+    if (sums[byScore[s]] !== previous) rank = s + 1
+    previous = sums[byScore[s]]
+    overall[byScore[s]] = rank
+  }
+  return overall
+}
+
+function compareCatalogEntries(left, right, sort) {
+  var a = left.entry
+  var b = right.entry
   var mode = sort || CATALOG_SORT_STARS
   if (mode === CATALOG_SORT_RECENTLY_ADDED) {
-    var leftHasTimestamp = leftTimestamp !== null
-    var rightHasTimestamp = rightTimestamp !== null
+    var leftHasTimestamp = left.timestamp !== null && left.timestamp !== undefined
+    var rightHasTimestamp = right.timestamp !== null && right.timestamp !== undefined
     if (leftHasTimestamp !== rightHasTimestamp) return leftHasTimestamp ? -1 : 1
-    if (leftHasTimestamp && leftTimestamp !== rightTimestamp) return leftTimestamp > rightTimestamp ? -1 : 1
-  } else if (mode === CATALOG_SORT_STARS || mode === CATALOG_SORT_HEARTS) {
-    var field = mode === CATALOG_SORT_HEARTS ? "marketplaceHearts" : "stars"
-    var leftMetric = a[field] === null ? -1 : a[field]
-    var rightMetric = b[field] === null ? -1 : b[field]
+    if (leftHasTimestamp && left.timestamp !== right.timestamp) return left.timestamp > right.timestamp ? -1 : 1
+  } else if (mode === CATALOG_SORT_ACTIVITY) {
+    var leftHasActivity = left.activity !== null && left.activity !== undefined
+    var rightHasActivity = right.activity !== null && right.activity !== undefined
+    if (leftHasActivity !== rightHasActivity) return leftHasActivity ? -1 : 1
+    if (leftHasActivity && left.activity !== right.activity) return left.activity > right.activity ? -1 : 1
+  } else if (mode === CATALOG_SORT_STARS || mode === CATALOG_SORT_HEARTS
+    || mode === CATALOG_SORT_VIEWS || mode === CATALOG_SORT_COPIES) {
+    var field = mode === CATALOG_SORT_HEARTS ? "marketplaceHearts"
+      : mode === CATALOG_SORT_VIEWS ? "marketplaceViews"
+      : mode === CATALOG_SORT_COPIES ? "marketplaceCopies" : "stars"
+    var leftMetric = a[field] === null || a[field] === undefined ? -1 : a[field]
+    var rightMetric = b[field] === null || b[field] === undefined ? -1 : b[field]
     if (leftMetric !== rightMetric) return rightMetric - leftMetric
+  } else if (mode === CATALOG_SORT_INSTALL_RATE) {
+    if (left.installRate !== right.installRate) return right.installRate - left.installRate
+    var leftViews = catalogInstallRateViews(a)
+    var rightViews = catalogInstallRateViews(b)
+    if (leftViews !== rightViews) return rightViews - leftViews
+  } else if (mode === CATALOG_SORT_RANK) {
+    var leftHasRank = left.rank !== null && left.rank !== undefined
+    var rightHasRank = right.rank !== null && right.rank !== undefined
+    if (leftHasRank !== rightHasRank) return leftHasRank ? -1 : 1
+    if (leftHasRank && left.rank !== right.rank) return left.rank - right.rank
+  } else if (mode === CATALOG_SORT_VERIFIED || mode === CATALOG_SORT_UNVERIFIED) {
+    var leftVerified = a.verified === true
+    var rightVerified = b.verified === true
+    if (leftVerified !== rightVerified) {
+      if (mode === CATALOG_SORT_VERIFIED) return leftVerified ? -1 : 1
+      return leftVerified ? 1 : -1
+    }
   }
 
   var leftName = String(a.name || "").toLowerCase()
@@ -1451,19 +1586,27 @@ function compareCatalogEntries(a, b, sort, leftTimestamp, rightTimestamp) {
 // QML JavaScript engine whose Array.sort stability is not guaranteed.
 function sortCatalog(entries, sort) {
   var mode = sort || CATALOG_SORT_STARS
+  var ranks = mode === CATALOG_SORT_RANK ? catalogRankScores(entries) : null
   var decorated = []
   for (var i = 0; i < (entries || []).length; i++) {
+    var current = entries[i]
     decorated.push({
-      entry: entries[i],
+      entry: current,
       index: i,
       timestamp: mode !== CATALOG_SORT_RECENTLY_ADDED ? null
-        : (entries[i] && entries[i].listedTimestamp !== undefined
-          ? entries[i].listedTimestamp
-          : catalogTimestamp(entries[i]))
+        : (current && current.listedTimestamp !== undefined
+          ? current.listedTimestamp
+          : catalogTimestamp(current)),
+      activity: mode !== CATALOG_SORT_ACTIVITY ? null
+        : (current && current.activityTimestamp !== undefined
+          ? current.activityTimestamp
+          : catalogActivityTimestamp(current)),
+      installRate: mode !== CATALOG_SORT_INSTALL_RATE ? 0 : catalogInstallRateScore(current),
+      rank: ranks ? ranks[i] : null
     })
   }
   decorated.sort(function(a, b) {
-    return compareCatalogEntries(a.entry, b.entry, mode, a.timestamp, b.timestamp) || a.index - b.index
+    return compareCatalogEntries(a, b, mode) || a.index - b.index
   })
 
   var out = []
@@ -1511,9 +1654,16 @@ function catalogAvailabilityOptions() {
 function catalogSortOptions() {
   return [
     { value: CATALOG_SORT_RECENTLY_ADDED, label: "Recently added" },
-    { value: CATALOG_SORT_STARS, label: "GitHub stars" },
-    { value: CATALOG_SORT_HEARTS, label: "Hearts" },
-    { value: CATALOG_SORT_NAME, label: "Name" }
+    { value: CATALOG_SORT_ACTIVITY, label: "Recent activity" },
+    { value: CATALOG_SORT_STARS, label: "Most starred" },
+    { value: CATALOG_SORT_VIEWS, label: "Most viewed" },
+    { value: CATALOG_SORT_COPIES, label: "Most copied" },
+    { value: CATALOG_SORT_HEARTS, label: "Most hearts" },
+    { value: CATALOG_SORT_RANK, label: "Top ranked" },
+    { value: CATALOG_SORT_INSTALL_RATE, label: "Install rate" },
+    { value: CATALOG_SORT_NAME, label: "A–Z" },
+    { value: CATALOG_SORT_VERIFIED, label: "Verified" },
+    { value: CATALOG_SORT_UNVERIFIED, label: "Unverified" }
   ]
 }
 

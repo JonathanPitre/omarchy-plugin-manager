@@ -84,10 +84,11 @@ MAX_PLUGINS = 4 * 1024 * 1024
 CACHE_DIR = (".cache", "omarchy-plugin-manager")
 CACHE_FILE = "catalog.json"
 CACHE_TTL = 6 * 60 * 60
-PROJECTION_SCHEMA = 2
+PROJECTION_SCHEMA = 3
 PROJECTED_KEYS = ("id", "name", "description", "author", "version", "category", "tags", "kind",
                   "repo", "installCommand", "installAvailable", "installNote", "verificationStatus",
-                  "sourceType", "stars", "addedAt", "listedAt", "marketplaceHearts", "accent",
+                  "sourceType", "stars", "addedAt", "listedAt", "marketplaceHearts", "marketplaceViews",
+                  "marketplaceCopies", "repositoryUpdatedAt", "versionUpdatedAt", "accent",
                   "initials", "license", "previewThumbnail", "listingValidatedBranch",
                   "verificationCommit")
 MAX_TREE = 16 * 1024 * 1024
@@ -283,10 +284,10 @@ def usable_projection(raw):
 
 
 def project_catalog(raw, stats_raw):
-    """The catalog reduced to PROJECTED_KEYS, hearts joined by plugin id.
+    """The catalog reduced to PROJECTED_KEYS, engagement stats joined by plugin id.
 
     Stats are a courtesy: anything unusable about them reads as missing
-    hearts rather than a missing storefront. The catalog itself is not: a
+    engagement rather than a missing storefront. The catalog itself is not: a
     body this cannot read, an entry that is not an object or has no string
     id, or a projection over the cache bound fails the refresh, and the
     caller falls back to whatever compatible cache it already has.
@@ -305,9 +306,12 @@ def project_catalog(raw, stats_raw):
     for entry in doc["plugins"]:
         require(type(entry) is dict and isinstance(entry.get("id"), str), "Malformed catalog entry")
         record = stats.get(entry["id"])
-        hearts = record.get("hearts") if type(record) is dict else None
+        record = record if type(record) is dict else {}
         projected = {key: entry.get(key) for key in PROJECTED_KEYS}
-        projected["marketplaceHearts"] = None if hearts is None or hearts is False else hearts
+        for key, stat in (("marketplaceHearts", "hearts"), ("marketplaceViews", "views"),
+                          ("marketplaceCopies", "copies")):
+            value = record.get(stat)
+            projected[key] = None if value is None or value is False else value
         plugins.append(projected)
     # A number that overflowed to infinity on parse would serialize as a bare
     # token no JSON parser accepts; refusing it here keeps the good cache.

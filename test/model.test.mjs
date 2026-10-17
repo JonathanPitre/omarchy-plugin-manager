@@ -2310,9 +2310,16 @@ test("details name an unreviewed offer as unreviewed, in both windows", () => {
 test("Browse sort options put Recently added first", () => {
   assert.deepEqual(Model.catalogSortOptions(), [
     { value: "recently-added", label: "Recently added" },
-    { value: "stars", label: "GitHub stars" },
-    { value: "hearts", label: "Hearts" },
-    { value: "name", label: "Name" }
+    { value: "updated", label: "Recent activity" },
+    { value: "stars", label: "Most starred" },
+    { value: "views", label: "Most viewed" },
+    { value: "copies", label: "Most copied" },
+    { value: "hearts", label: "Most hearts" },
+    { value: "rank", label: "Top ranked" },
+    { value: "installRate", label: "Install rate" },
+    { value: "name", label: "A–Z" },
+    { value: "verified", label: "Verified" },
+    { value: "unverified", label: "Unverified" }
   ])
 })
 
@@ -2367,6 +2374,46 @@ test("Browse sorting keeps stars and hearts independent with deterministic tie-b
   assert.deepEqual(Model.sortCatalog(entries, "name").map(e => e.id),
     ["c.alpha", "b.beta", "A.same", "z.same"])
   assert.deepEqual(entries.map(e => e.id), ["z.same", "A.same", "b.beta", "c.alpha"])
+})
+
+test("Browse sort modes follow their listing data and put missing values last", () => {
+  const entries = [
+    { id: "missing", name: "A missing", verified: false },
+    { id: "old", name: "B old", stars: 1, marketplaceHearts: 1, marketplaceViews: 20,
+      marketplaceCopies: 1, listedAt: "2026-08-01T00:00:00Z", repositoryUpdatedAt: "2026-08-01T00:00:00Z",
+      installCommand: "install old", verified: true },
+    { id: "new", name: "C new", stars: 3, marketplaceHearts: 3, marketplaceViews: 100,
+      marketplaceCopies: 20, listedAt: "2026-08-03T00:00:00Z", versionUpdatedAt: "2026-08-03T00:00:00Z",
+      installCommand: "install new", verified: false },
+    { id: "middle", name: "D middle", stars: 2, marketplaceHearts: 2, marketplaceViews: 50,
+      marketplaceCopies: 10, listedAt: "2026-08-02T00:00:00Z", repositoryUpdatedAt: "2026-08-02T00:00:00Z",
+      installCommand: "install middle", verified: true }
+  ]
+
+  assert.deepEqual(Model.sortCatalog(entries, "updated").map(e => e.id), ["new", "middle", "old", "missing"])
+  assert.deepEqual(Model.sortCatalog(entries, "views").map(e => e.id), ["new", "middle", "old", "missing"])
+  assert.deepEqual(Model.sortCatalog(entries, "copies").map(e => e.id), ["new", "middle", "old", "missing"])
+  assert.deepEqual(Model.sortCatalog(entries, "installRate").map(e => e.id), ["new", "middle", "old", "missing"])
+  assert.deepEqual(Model.sortCatalog(entries, "rank").map(e => e.id), ["new", "middle", "old", "missing"])
+  assert.deepEqual(Model.sortCatalog(entries, "verified").map(e => e.id), ["old", "middle", "missing", "new"])
+  assert.deepEqual(Model.sortCatalog(entries, "unverified").map(e => e.id), ["missing", "new", "old", "middle"])
+})
+
+test("Browse install rate needs 20 views and top-ranked ties keep name order", () => {
+  const entries = [
+    { id: "few", name: "A few views", marketplaceViews: 19, marketplaceCopies: 19, installCommand: "install" },
+    { id: "tie-b", name: "B tied", stars: 10, marketplaceHearts: 10, marketplaceViews: 20, marketplaceCopies: 10 },
+    { id: "tie-a", name: "A tied", stars: 10, marketplaceHearts: 10, marketplaceViews: 20, marketplaceCopies: 10 },
+    { id: "rated", name: "Rated", marketplaceViews: 20, marketplaceCopies: 20, installCommand: "install" }
+  ]
+
+  assert.deepEqual(Model.sortCatalog(entries, "installRate").map(e => e.id), ["rated", "tie-a", "tie-b", "few"])
+  assert.deepEqual(Model.sortCatalog(entries, "rank").map(e => e.id), ["tie-a", "tie-b", "rated", "few"])
+})
+
+test("catalog engagement stats come only from marketplace-prefixed projection fields", () => {
+  const entry = Model.catalogEntries({ plugins: [{ id: "bare", hearts: 5, views: 30, copies: 4 }] }, {})[0]
+  assert.deepEqual([entry.marketplaceHearts, entry.marketplaceViews, entry.marketplaceCopies], [null, null, null])
 })
 
 test("Browse sorting is stable for exact missing-metadata ties", () => {
@@ -3553,7 +3600,7 @@ test("browseFilterHints names the filter when neutral and its value when narrowi
     { key: "c", text: "GAMES", active: true },
     { key: "f", text: "BAR-WIDGET", active: true },
     { key: "a", text: "INSTALLED", active: true },
-    { key: "s", text: "GITHUB STARS", active: true }
+    { key: "s", text: "MOST STARRED", active: true }
   ])
   // A value the options no longer carry still reads as itself, never blank.
   assert.equal(Model.browseFilterHints({ category: "gone" }, options)[0].text, "GONE")
@@ -3815,8 +3862,9 @@ test("every keyboard-cycled filter replays its value into its dropdown", () => {
 
 test("nextOption cycles any option list and nextKind is that same walk", () => {
   const options = Model.catalogSortOptions()
-  assert.equal(Model.nextOption(options, "recently-added"), "stars")
-  assert.equal(Model.nextOption(options, "name"), "recently-added")
+  assert.equal(Model.nextOption(options, "recently-added"), "updated")
+  assert.equal(Model.nextOption(options, "name"), "verified")
+  assert.equal(Model.nextOption(options, "unverified"), "recently-added")
   assert.equal(Model.nextOption(options, "gone"), "recently-added")
   assert.equal(Model.nextKind(options, "hearts"), Model.nextOption(options, "hearts"))
 })
