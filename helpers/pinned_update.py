@@ -1015,10 +1015,15 @@ class Updater:
         return ids
 
     def session_env(self):
-        """The Wayland session a host IPC call needs, taken from the display alone."""
+        """The Wayland session a host IPC call needs, taken from the display alone.
+
+        Qt warns on stdout, ahead of any reply, under a locale that is not
+        UTF-8, so the helper's LC_ALL=C would make every JSON answer unreadable.
+        """
         display = os.environ.get("WAYLAND_DISPLAY", "")
         require(re.fullmatch(r"wayland-[0-9]{1,4}", display), "Wayland display unavailable")
-        return {"XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}", "WAYLAND_DISPLAY": display}
+        return {"XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}", "WAYLAND_DISPLAY": display,
+                "LC_ALL": "C.UTF-8"}
 
     def open_home(self):
         """The account home as a descriptor, reached without resolving any symlink."""

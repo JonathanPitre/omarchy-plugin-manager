@@ -1056,6 +1056,32 @@ class TransactionTests(unittest.TestCase):
             with patch.dict(os.environ, {"WAYLAND_DISPLAY": "not-a-display"}), self.assertRaises(u.Refused):
                 updater.enable(NEW_ID, "right")
 
+    def test_host_calls_get_a_utf8_locale_so_qt_warnings_stay_off_stdout(self):
+        # Quickshell warns on stdout, ahead of the JSON, whenever the locale
+        # is not UTF-8. Under the helper's LC_ALL=C that made every plugin
+        # list unreadable, so a fresh install was never enabled.
+        updater = u.Updater(home=str(self.home))
+        real_popen = subprocess.Popen
+        calls = []
+        warning = b'WARN: Detected locale "C" with character encoding "ANSI_X3.4-1968", which is not UTF-8.\n'
+
+        def host(argv, **kwargs):
+            calls.append((argv, kwargs))
+            utf8 = "UTF-8" in kwargs["env"].get("LC_ALL", "")
+            out = (b"" if utf8 else warning) + (
+                b'[{"id":"' + NEW_ID.encode() + b'"}]' if argv[0].endswith("plugin-list") else b"ok")
+            return real_popen(["/usr/bin/python3", "-I", "-S", "-c",
+                               "import os; os.write(1, " + repr(out) + ")"], **kwargs)
+
+        with patch.object(subprocess, "Popen", side_effect=host), \
+                patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-1"}):
+            updater.reload()
+            updater.enable(NEW_ID, "right")
+        self.assertEqual([argv[0] for argv, _ in calls], ["/usr/bin/qs", "/usr/bin/omarchy-plugin-list",
+                                                          "/usr/bin/omarchy-plugin-enable"])
+        for _, options in calls:
+            self.assertEqual(options["env"]["LC_ALL"], "C.UTF-8")
+
     def test_packed_nested_head_without_loose_parent_updates(self):
         self.git("-C", str(self.plugin), "branch", "-m", "feature/example")
         self.git("-C", str(self.plugin), "pack-refs", "--all", "--prune")
