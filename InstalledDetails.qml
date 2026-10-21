@@ -38,7 +38,7 @@ Item {
   readonly property bool canMove: Model.canMove(row)
   // The marketplace listing for this row, when the catalog has one: it lends
   // the pane its picture and its initials. Null is fine; the checkout's own
-  // preview.png and the repository guess still apply.
+  // preview.png still applies.
   property var catalogEntry: null
   property bool previewsEnabled: true
   property color background: Color.menu.background

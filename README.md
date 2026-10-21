@@ -839,21 +839,21 @@ out of it, validated, and passed to the same argv array everything else uses.
 
 ### Where the card previews come from
 
-Each card tries three sources in order and stops at the first that decodes:
+Each card tries two sources in order and stops at the first that decodes:
 
-1. **The repository's own `preview.png`**, read straight from
-   `raw.githubusercontent.com` at the branch the registry validated. Most
-   plugins ship one — 31 of a 40-repo sample — and PNG is a format Qt always
-   reads.
-2. **The registry's curated thumbnail.** These are WebP, which Qt decodes only
+1. **The registry's curated thumbnail.** These are WebP, which Qt decodes only
    when `qt6-imageformats` is installed. It is not a dependency of Omarchy or
    Quickshell, so on a stock system this step is skipped after the first
    failure tells the panel so.
-3. **The accent-and-initials tile** the registry ships for listings with no
-   screenshot at all.
+2. **The accent-and-initials tile**, drawn from the listing's accent colour
+   and initials whenever no picture decodes.
 
-Installing `qt6-imageformats` adds the second source, which fills in most of
-what the first one misses:
+The panel never fetches a `preview.png` from a plugin's repository. A branch
+can change after the marketplace verified it, and the shell would decode
+whatever image it held. Installed plugins also show their checkout's own
+`preview.png` from disk, which is exactly what you installed.
+
+Installing `qt6-imageformats` turns on the thumbnails:
 
 ```bash
 sudo pacman -S qt6-imageformats
@@ -961,8 +961,8 @@ This uses Quickshell's supported command list instead of a map-to-hash environme
 | `gh` | starring and unstarring GitHub repositories without leaving the panel (`/usr/bin/gh` or the mise `global`/`latest` install, never `PATH`) |
 
 Optional: **`qt6-imageformats`** turns on the registry's WebP card thumbnails
-(see [above](#where-the-card-previews-come-from)). Without it the panel falls
-back to repository `preview.png` files and accent tiles.
+(see [above](#where-the-card-previews-come-from)). Without it Browse shows
+accent tiles, and Installed shows each checkout's own `preview.png`.
 
 ### What it writes
 

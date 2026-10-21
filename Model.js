@@ -1430,7 +1430,6 @@ function catalogEntries(doc, installedIds, allowUnverified) {
       // is the only one the rest of the panel can reach for such a listing.
       unverifiedSnapshot: ids[p.id] === 1 ? catalogUnverifiedSnapshot(p) : null,
       branch: String(p.listingValidatedBranch || ""),
-      repoPreview: repoPreviewUrl(p.repo, p.listingValidatedBranch),
       installed: hasOwnKey(installed, p.id)
     }
     // Both derived once here, on the worker thread, rather than on every
@@ -2253,28 +2252,18 @@ function catalogVersionFallbackUrl(entry) {
   return githubRepositoryUrl(entry.repo)
 }
 
-function repoPreviewUrl(repo, branch) {
-  var slug = githubRepoSlug(repo)
-  if (slug === "") return ""
-
-  var ref = String(branch || "").trim()
-  return "https://raw.githubusercontent.com/" + slug + "/" + (ref !== "" ? ref : "main") + "/preview.png"
-}
-
-// Ordered best-first. A card walks this list as each source fails, and lands
-// on the accent tile when none of them decode.
+// Only the registry's own thumbnail. A repository's preview.png is never
+// fetched: its branch can change after verification, and the shell would
+// decode whatever bytes it held.
 function previewCandidates(entry, allowWebp) {
   if (!entry) return []
-  var out = []
-  if (entry.repoPreview) out.push(entry.repoPreview)
-  if (allowWebp && entry.thumbnail) out.push(entry.thumbnail)
-  return out
+  return allowWebp && entry.thumbnail ? [entry.thumbnail] : []
 }
 
 // An installed plugin's picture, best first: the checkout's own preview.png
-// (on disk, no network, and exactly what is installed), then whatever the
-// marketplace listing offers, then the repository guess from the remote. A
-// source directory is a filesystem path or nothing; anything that already
+// (on disk, no network, and exactly what is installed), then the registry
+// thumbnail. Nothing is fetched from the plugin's repository. A source
+// directory is a filesystem path or nothing; anything that already
 // looks like a URL is refused rather than turned into one.
 function installedPreviewCandidates(row, entry, allowWebp) {
   if (!row) return []
@@ -2284,8 +2273,6 @@ function installedPreviewCandidates(row, entry, allowWebp) {
     out.push("file://" + dir.replace(/\/+$/, "") + "/preview.png")
   var listed = previewCandidates(entry, allowWebp)
   for (var i = 0; i < listed.length; i++) if (out.indexOf(listed[i]) === -1) out.push(listed[i])
-  var guessed = repoPreviewUrl(row.remote, "")
-  if (guessed !== "" && out.indexOf(guessed) === -1) out.push(guessed)
   return out
 }
 

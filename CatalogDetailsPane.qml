@@ -35,10 +35,9 @@ Item {
 
   readonly property string repoUrl: Model.browsableUrl(entry ? entry.repo : "")
 
-  // Same best-first walk the card and the popup's details use: the
-  // repository's preview.png, then the registry's WebP thumbnail, then the
-  // accent-and-initials tile. Restarts whenever the panel hands over another
-  // listing.
+  // Same walk the card and the popup's details use: the registry's WebP
+  // thumbnail, then the accent-and-initials tile. Restarts whenever the panel
+  // hands over another listing.
   readonly property color accent: Model.accentColor(entry ? entry.accent : "")
   readonly property var previewSources: Model.previewCandidates(entry, previewsEnabled)
   property int previewIndex: 0

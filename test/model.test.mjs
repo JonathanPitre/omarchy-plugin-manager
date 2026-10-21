@@ -32,7 +32,7 @@ const Model = new Function(
     normalizedManifestVersion, normalizedReleaseVersion, releaseVersionLabel,
     githubReleaseCandidates, versionReleaseCandidates, versionFallbackUrl,
     catalogVersionLabel, catalogVersionReleaseCandidates, catalogVersionFallbackUrl,
-    repoPreviewUrl, previewCandidates, installedPreviewCandidates, rowInitials,
+    previewCandidates, installedPreviewCandidates, rowInitials,
     parseUpdateReport, applyUpdateReport, applyPinnedUpdates, pinnedRequest, installRequest, pinnedUpdateTooltip, updateStatus, updateCompareLabel,
     unverifiedRequest, updateUnverifiedConfirmMessage, parseSelfSettings, parseSelfEntry, withSelfSetting, allowUnverifiedUpdates,
     tiledExpandedPanel, openAs, withOpenAs, expandedModeFromPayload, selfEntryFromShellConfig,
@@ -2152,22 +2152,22 @@ test("catalogHeartsById joins Marketplace hearts onto installed rows by id", () 
   assert.equal(Model.rowHeartLabel({ id: "s" }, Model.catalogHeartsById([{ id: "s", stars: 5 }])), "")
 })
 
-test("installedPreviewCandidates prefers the checkout's own preview, then the listing's", () => {
+test("installedPreviewCandidates prefers the checkout's own preview, then the registry thumbnail", () => {
   const row = { id: "acme.weather", name: "Weather", sourceDir: "/home/u/.config/omarchy/plugins/acme.weather", remote: "https://github.com/acme/omarchy-weather.git" }
   const entry = { repoPreview: "https://raw.githubusercontent.com/acme/omarchy-weather/main/preview.png", thumbnail: "https://cdn.example/acme.webp" }
   assert.deepEqual(Model.installedPreviewCandidates(row, entry, true), [
     "file:///home/u/.config/omarchy/plugins/acme.weather/preview.png",
-    "https://raw.githubusercontent.com/acme/omarchy-weather/main/preview.png",
     "https://cdn.example/acme.webp"
   ])
-  // No WebP when the build cannot decode it; no listing means the repository
-  // guess from the remote; no checkout means no local file.
-  assert.deepEqual(Model.installedPreviewCandidates(row, entry, false).slice(-1), ["https://raw.githubusercontent.com/acme/omarchy-weather/main/preview.png"])
-  assert.deepEqual(Model.installedPreviewCandidates(row, null, true), [
-    "file:///home/u/.config/omarchy/plugins/acme.weather/preview.png",
-    "https://raw.githubusercontent.com/acme/omarchy-weather/main/preview.png"
+  // Nothing is ever fetched from the plugin's repository: not the listing's
+  // branch, and not a guess from the checkout's remote.
+  assert.deepEqual(Model.installedPreviewCandidates(row, entry, false), [
+    "file:///home/u/.config/omarchy/plugins/acme.weather/preview.png"
   ])
-  assert.deepEqual(Model.installedPreviewCandidates({ id: "x", name: "X", sourceDir: "", remote: "" }, null, true), [])
+  assert.deepEqual(Model.installedPreviewCandidates(row, null, true), [
+    "file:///home/u/.config/omarchy/plugins/acme.weather/preview.png"
+  ])
+  assert.deepEqual(Model.installedPreviewCandidates({ id: "x", name: "X", sourceDir: "", remote: "https://github.com/acme/x" }, null, true), [])
   assert.deepEqual(Model.installedPreviewCandidates(null, entry, true), [])
   // A hostile source directory cannot smuggle a query or a scheme in.
   assert.deepEqual(Model.installedPreviewCandidates({ id: "y", name: "Y", sourceDir: "https://evil/x", remote: "" }, null, true), [])
@@ -2757,28 +2757,22 @@ test("Release candidates preserve hardened GitHub owner and repository boundarie
   ]) assert.deepEqual(Model.githubReleaseCandidates(remote, "1.0.0"), [], remote)
 })
 
-test("repoPreviewUrl points at the repo's own preview.png on the validated branch", () => {
-  assert.equal(
-    Model.repoPreviewUrl("https://github.com/acme/thing", "master"),
-    "https://raw.githubusercontent.com/acme/thing/master/preview.png")
-  assert.equal(
-    Model.repoPreviewUrl("https://github.com/acme/thing.git", ""),
-    "https://raw.githubusercontent.com/acme/thing/main/preview.png")
-})
-
-test("repoPreviewUrl only builds urls for github repos it can parse", () => {
-  assert.equal(Model.repoPreviewUrl("https://gitlab.com/acme/thing", "main"), "")
-  assert.equal(Model.repoPreviewUrl("https://github.com/acme", "main"), "")
-  assert.equal(Model.repoPreviewUrl("", "main"), "")
-})
-
-test("previewCandidates tries the repo png before the registry webp", () => {
-  const entry = { repoPreview: "https://raw.example/preview.png", thumbnail: "https://reg.example/x.webp" }
-  assert.deepEqual(Model.previewCandidates(entry, true),
-    ["https://raw.example/preview.png", "https://reg.example/x.webp"])
-  // Once WebP is known undecodable the panel drops it from the walk.
-  assert.deepEqual(Model.previewCandidates(entry, false), ["https://raw.example/preview.png"])
-  assert.deepEqual(Model.previewCandidates({ repoPreview: "", thumbnail: "" }, true), [])
+test("previewCandidates offers only the registry thumbnail, never the repository's branch", () => {
+  const listing = { id: "acme.thing", name: "Thing", repo: "https://github.com/acme/thing",
+                    previewThumbnail: "/thumbnails/acme.thing.webp", listingValidatedBranch: "main" }
+  const entry = Model.catalogEntries({ plugins: [listing] }, {}, true)[0]
+  // The branch's preview.png can change after verification, and the shell
+  // would decode whatever it held; the catalog entry does not carry it.
+  assert.equal("repoPreview" in entry, false)
+  // The only remote picture left is the registry's own asset host.
+  assert.equal(entry.thumbnail, "https://omarchyplugins.com/thumbnails/acme.thing.webp")
+  assert.deepEqual(Model.previewCandidates(entry, true), [entry.thumbnail])
+  // Once WebP is known undecodable there is nothing left to try.
+  assert.deepEqual(Model.previewCandidates(entry, false), [])
+  // A stale entry that still names a repository image is ignored.
+  assert.deepEqual(Model.previewCandidates({ repoPreview: "https://raw.example/preview.png", thumbnail: "https://reg.example/x.webp" }, true),
+    ["https://reg.example/x.webp"])
+  assert.deepEqual(Model.previewCandidates({ thumbnail: "" }, true), [])
   assert.deepEqual(Model.previewCandidates(null, true), [])
 })
 

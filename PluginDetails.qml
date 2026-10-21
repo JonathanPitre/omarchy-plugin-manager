@@ -31,9 +31,9 @@ Item {
 
   readonly property string repoUrl: Model.browsableUrl(entry ? entry.repo : "")
 
-  // Same best-first walk the Browse card uses: the repository's preview.png,
-  // then the registry's WebP thumbnail, then the accent-and-initials tile. The
-  // walk restarts whenever the panel hands this surface another plugin.
+  // Same walk the Browse card uses: the registry's WebP thumbnail, then the
+  // accent-and-initials tile. The walk restarts whenever the panel hands this
+  // surface another plugin.
   readonly property color accent: Model.accentColor(entry ? entry.accent : "")
   readonly property var previewSources: Model.previewCandidates(entry, previewsEnabled)
   property int previewIndex: 0

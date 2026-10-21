@@ -52,9 +52,11 @@ Rectangle {
   readonly property int descriptionLines: showMeta ? 3 : 5
   readonly property real descriptionHeight: Math.ceil(descriptionMetrics.lineSpacing * descriptionLines)
 
-  // Sources are tried best-first: the repository's own preview.png, then the
-  // registry's curated WebP thumbnail, then the accent tile. GridView recycles
-  // delegates, so the walk restarts whenever a card is handed a new plugin.
+  // Sources are tried in order: the registry's curated WebP thumbnail, then the
+  // accent tile. A repository's own preview.png is never fetched: its branch
+  // can change after verification, and this card decodes inside the shell.
+  // GridView recycles delegates, so the walk restarts whenever a card is
+  // handed a new plugin.
   readonly property var previewSources: Model.previewCandidates(entry, previewsEnabled)
   property int previewIndex: 0
   readonly property string previewSource: previewIndex < previewSources.length
