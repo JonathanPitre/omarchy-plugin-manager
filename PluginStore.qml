@@ -1917,7 +1917,11 @@ Item {
     + "    origin=$(git -C \"$path\" remote get-url origin 2>/dev/null); "
     + "    case \"$origin\" in https://github.com/*) "
     + "      slug=${origin#https://github.com/}; slug=${slug%.git}; "
-    + "      remote_version=$(curl -fsSL --max-time 8 \"https://raw.githubusercontent.com/$slug/$remote_sha/manifest.json\" 2>/dev/null | jq -r '.version // \"\"' 2>/dev/null); "
+    // --max-time bounds time, not bytes, and jq buffers its whole input.
+    // Read one byte past 64 KiB so an oversized manifest is refused whole,
+    // never truncated into JSON that still parses; cap the version too.
+    + "      remote_version=$(curl -fsSL --max-time 8 --max-filesize 65536 \"https://raw.githubusercontent.com/$slug/$remote_sha/manifest.json\" 2>/dev/null | head -c 65537 "
+    + "        | jq -Rrs 'if utf8bytelength > 65536 then \"\" else (fromjson? // {}) | (.version? // \"\") | tostring | .[0:128] end' 2>/dev/null); "
     + "    ;; esac; "
     + "  fi; "
     + "  jq -cn --arg path \"$path\" --arg localSha \"$local_sha\" --arg remoteSha \"$remote_sha\" "

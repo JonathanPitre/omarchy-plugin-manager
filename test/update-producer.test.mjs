@@ -412,6 +412,7 @@ test("update producer reads remote manifest versions without background tag prob
   const root = mkdtempSync(join(tmpdir(), "plugin-update-version-test-"))
   const home = join(root, "home"), runtime = join(root, "runtime"), bin = join(root, "bin")
   const plugins = join(home, ".config", "omarchy", "plugins"), gitLog = join(root, "git-requests")
+  const curlLog = join(root, "curl-requests")
   const localSha = "a".repeat(40)
   const remote = {
     "01-lightweight": "b".repeat(40),
@@ -425,7 +426,9 @@ test("update producer reads remote manifest versions without background tag prob
     "09-invalid-ref": "4".repeat(40),
     "10-plain-tag": "5".repeat(40),
     "11-annotated-plain": "6".repeat(40),
-    "12-non-github": "7".repeat(40)
+    "12-non-github": "7".repeat(40),
+    "13-huge-body": "8".repeat(40),
+    "14-long-version": "9".repeat(40)
   }
 
   try {
@@ -447,6 +450,7 @@ remote_sha() { case "$id" in
   07-malicious) printf '${remote["07-malicious"]}';; 08-oversized) printf '${remote["08-oversized"]}';;
   09-invalid-ref) printf '${remote["09-invalid-ref"]}';; 10-plain-tag) printf '${remote["10-plain-tag"]}';;
   11-annotated-plain) printf '${remote["11-annotated-plain"]}';; 12-non-github) printf '${remote["12-non-github"]}';;
+  13-huge-body) printf '${remote["13-huge-body"]}';; 14-long-version) printf '${remote["14-long-version"]}';;
 esac; }
 case "$command" in
   rev-parse) [ "\${1:-}" = --abbrev-ref ] && printf 'main\\n' || printf '${localSha}\\n';;
@@ -459,6 +463,7 @@ esac
 `)
     executable(join(bin, "curl"), `#!/usr/bin/env bash
 url="\${@: -1}"
+printf '%s\\n' "$*" >> "$CURL_LOG"
 case "$url" in
   */${remote["01-lightweight"]}/manifest.json) printf '{"version":"2.0.0"}';;
   */${remote["02-annotated"]}/manifest.json) printf '{"version":"2.1.0"}';;
@@ -471,13 +476,15 @@ case "$url" in
   */${remote["09-invalid-ref"]}/manifest.json) printf '{"version":"bad..tag"}';;
   */${remote["10-plain-tag"]}/manifest.json) printf '{"version":"3.0.0"}';;
   */${remote["11-annotated-plain"]}/manifest.json) printf '{"version":"3.1.0"}';;
+  */${remote["13-huge-body"]}/manifest.json) printf '{"version":"9.9.9"}'; head -c 1048576 /dev/zero | tr '\\0' ' ';;
+  */${remote["14-long-version"]}/manifest.json) printf '{"version":"%s"}' "$(printf 'y%.0s' {1..300})";;
   *) exit 22;;
 esac
 `)
 
     const result = runProducer({
       HOME: home, XDG_RUNTIME_DIR: runtime, PATH: `${bin}:${process.env.PATH}`,
-      LC_ALL: "C", GIT_LOG: gitLog
+      LC_ALL: "C", GIT_LOG: gitLog, CURL_LOG: curlLog
     })
     assert.equal(result.status, 0, result.stderr)
     assert.equal(result.stderr, "")
@@ -495,6 +502,13 @@ esac
     assert.equal(byId["10-plain-tag"].remoteVersion, "3.0.0")
     assert.equal(byId["11-annotated-plain"].remoteVersion, "3.1.0")
     assert.equal(byId["12-non-github"].remoteVersion, "")
+    // A manifest body over 64 KiB is refused whole, never truncated into
+    // something that parses, and the version string itself is capped.
+    assert.equal(byId["13-huge-body"].remoteVersion, "")
+    assert.equal(byId["14-long-version"].remoteVersion, "y".repeat(128))
+    for (const line of readFileSync(curlLog, "utf8").trim().split("\n")) {
+      assert.match(line, /(^| )--max-filesize 65536( |$)/)
+    }
 
     const requested = readFileSync(gitLog, "utf8")
     assert.doesNotMatch(requested, /refs\/tags\//)
